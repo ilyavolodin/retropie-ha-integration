@@ -301,6 +301,10 @@ def publish_game_event(event_type, args=None):
     # Events should NOT be retained - they should expire when received
     return publish_mqtt_message(topic, json.dumps(payload), retain=False)
 
+def publish_state_message(state_topic, state_value, retain=True):
+    """Publish a simple state message to MQTT"""
+    return publish_mqtt_message(state_topic, state_value, retain=retain)
+
 def publish_system_status():
     """Publish system status information to MQTT"""
     config = get_config()
@@ -330,26 +334,51 @@ def register_with_ha():
     # Clean device_name to avoid issues with MQTT topics
     safe_device_name = re.sub(r'[^a-zA-Z0-9_]', '_', device_name)
     
+    # Package version
+    sw_version = "1.0.0"
+    
     # Create device information
     device_info = {
-        "identifiers": [f"retropie_{safe_device_name}"],
+        "identifiers": [
+            f"retropie_{safe_device_name}"
+        ],
         "name": f"RetroPie {device_name}",
         "model": "RetroPie Arcade",
         "manufacturer": "RetroPie",
-        "sw_version": "1.0.0"
+        "sw_version": sw_version
     }
+    
+    # Origin information (like in the Zigbee example)
+    origin_info = {
+        "name": "RetroPie Home Assistant Integration",
+        "sw": sw_version,
+        "url": "https://github.com/yourusername/retropie-ha-integration"
+    }
+    
+    # Availability definition (common for all sensors)
+    availability = [
+        {
+            "topic": f"{topic_prefix}/status",
+            "value_template": "{{ 'online' }}"
+        }
+    ]
     
     # Register CPU temperature sensor
     cpu_temp_config = {
         "device": device_info,
         "name": f"RetroPie {device_name} CPU Temperature",
         "unique_id": f"retropie_{safe_device_name}_cpu_temp",
+        "object_id": f"retropie_{safe_device_name}_cpu_temp",
         "state_topic": f"{topic_prefix}/status",
         "value_template": "{{ value_json.system_info.cpu_temp }}",
         "unit_of_measurement": "°C",
         "device_class": "temperature",
         "state_class": "measurement",
-        "icon": "mdi:chip"
+        "icon": "mdi:chip",
+        "availability": availability,
+        "availability_mode": "all",
+        "enabled_by_default": True,
+        "origin": origin_info
     }
     
     # Register GPU temperature sensor
@@ -357,12 +386,17 @@ def register_with_ha():
         "device": device_info,
         "name": f"RetroPie {device_name} GPU Temperature",
         "unique_id": f"retropie_{safe_device_name}_gpu_temp",
+        "object_id": f"retropie_{safe_device_name}_gpu_temp",
         "state_topic": f"{topic_prefix}/status",
         "value_template": "{{ value_json.system_info.gpu_temp }}",
         "unit_of_measurement": "°C",
         "device_class": "temperature",
         "state_class": "measurement",
-        "icon": "mdi:gpu"
+        "icon": "mdi:gpu",
+        "availability": availability,
+        "availability_mode": "all",
+        "enabled_by_default": True,
+        "origin": origin_info
     }
     
     # Register game status sensor with enhanced information
@@ -370,15 +404,16 @@ def register_with_ha():
         "device": device_info,
         "name": f"RetroPie {device_name} Game Status",
         "unique_id": f"retropie_{safe_device_name}_game_status",
+        "object_id": f"retropie_{safe_device_name}_game_status",
         "state_topic": f"{topic_prefix}/event/game-start",
         "value_template": "{{ value_json.game_name if 'game_name' in value_json else 'None' }}",
         "json_attributes_topic": f"{topic_prefix}/event/game-start",
         "json_attributes_template": "{{ {'description': value_json.description if 'description' in value_json else '', 'system': value_json.system if 'system' in value_json else '', 'emulator': value_json.emulator if 'emulator' in value_json else '', 'genre': value_json.genre if 'genre' in value_json else '', 'developer': value_json.developer if 'developer' in value_json else '', 'publisher': value_json.publisher if 'publisher' in value_json else '', 'rating': value_json.rating if 'rating' in value_json else '', 'releasedate': value_json.releasedate if 'releasedate' in value_json else '' } | tojson }}",
         "icon": "mdi:gamepad-variant",
-        "availability_topic": f"{topic_prefix}/status",
-        "availability_template": "{{ 'online' }}",
-        "payload_available": "online",
-        "payload_not_available": "offline"
+        "availability": availability,
+        "availability_mode": "all",
+        "enabled_by_default": True,
+        "origin": origin_info
     }
     
     # Register memory usage sensor
@@ -386,11 +421,16 @@ def register_with_ha():
         "device": device_info,
         "name": f"RetroPie {device_name} Memory Usage",
         "unique_id": f"retropie_{safe_device_name}_memory_usage",
+        "object_id": f"retropie_{safe_device_name}_memory_usage",
         "state_topic": f"{topic_prefix}/status",
         "value_template": "{{ value_json.system_info.memory.used / value_json.system_info.memory.total * 100 }}",
         "unit_of_measurement": "%",
         "icon": "mdi:memory",
-        "state_class": "measurement"
+        "state_class": "measurement",
+        "availability": availability,
+        "availability_mode": "all",
+        "enabled_by_default": True,
+        "origin": origin_info
     }
     
     # Register CPU load sensor
@@ -398,10 +438,15 @@ def register_with_ha():
         "device": device_info,
         "name": f"RetroPie {device_name} CPU Load",
         "unique_id": f"retropie_{safe_device_name}_cpu_load",
+        "object_id": f"retropie_{safe_device_name}_cpu_load",
         "state_topic": f"{topic_prefix}/status",
         "value_template": "{{ value_json.system_info.load[0] }}",
         "icon": "mdi:chip",
-        "state_class": "measurement"
+        "state_class": "measurement",
+        "availability": availability,
+        "availability_mode": "all",
+        "enabled_by_default": True,
+        "origin": origin_info
     }
     
     # Create an active client to ensure connection before publishing
@@ -416,6 +461,16 @@ def register_with_ha():
         client.connect(config['mqtt_host'], int(config.get('mqtt_port', 1883)), 60)
         client.loop_start()
         time.sleep(1)  # Give time for the connection to establish
+        
+        # Publish availability status topic first
+        availability_payload = "online"
+        client.publish(
+            f"{topic_prefix}/status",
+            availability_payload,
+            qos=1,
+            retain=True
+        )
+        logger.info(f"Published availability status")
         
         # Publish all discovery messages with retain flag set to True
         # This ensures they persist in the broker
