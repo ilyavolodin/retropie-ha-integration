@@ -191,6 +191,9 @@ if [ -n "$MQTT_USERNAME" ]; then
     mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/sensor/retropie_${DEVICE_NAME// /_}/machine_status/config" -n -r -d
     mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/sensor/retropie_${DEVICE_NAME// /_}/play_duration/config" -n -r -d
     mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/device_automation/retropie_${DEVICE_NAME// /_}/tts/config" -n -r -d
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/device_automation/retropie_${DEVICE_NAME// /_}/retroarch_message/config" -n -r -d
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/device_automation/retropie_${DEVICE_NAME// /_}/retroarch_command/config" -n -r -d
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/device_automation/retropie_${DEVICE_NAME// /_}/retroarch_status/config" -n -r -d
 else
     mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/sensor/retropie_${DEVICE_NAME// /_}/cpu_temp/config" -n -r -d
     mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/sensor/retropie_${DEVICE_NAME// /_}/gpu_temp/config" -n -r -d
@@ -200,6 +203,9 @@ else
     mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/sensor/retropie_${DEVICE_NAME// /_}/machine_status/config" -n -r -d
     mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/sensor/retropie_${DEVICE_NAME// /_}/play_duration/config" -n -r -d
     mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/device_automation/retropie_${DEVICE_NAME// /_}/tts/config" -n -r -d
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/device_automation/retropie_${DEVICE_NAME// /_}/retroarch_message/config" -n -r -d
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/device_automation/retropie_${DEVICE_NAME// /_}/retroarch_command/config" -n -r -d
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/device_automation/retropie_${DEVICE_NAME// /_}/retroarch_status/config" -n -r -d
 fi
 
 # Test audio for text-to-speech
@@ -207,6 +213,26 @@ echo "Testing text-to-speech functionality..."
 TTS_TEXT="RetroPie Home Assistant integration is now installed."
 pico2wave -w /tmp/tts_test.wav "$TTS_TEXT" && aplay /tmp/tts_test.wav
 rm -f /tmp/tts_test.wav
+
+# Test RetroArch network connection
+if [ "$RETROARCH_ENABLED" = true ]; then
+  echo "Testing RetroArch network connection..."
+  # Create a simple script to test the connection
+  cat > /tmp/retroarch_test.sh << 'EOF'
+#!/bin/bash
+echo -n "VERSION" | nc -u -w1 127.0.0.1 55355
+if [ $? -eq 0 ]; then
+  echo "RetroArch network connection test was successful!"
+else
+  echo "Could not connect to RetroArch. Please make sure RetroArch is running with network commands enabled."
+  echo "If RetroArch is currently closed, this is normal - the connection will be available when you launch RetroArch."
+fi
+EOF
+  chmod +x /tmp/retroarch_test.sh
+  # Run the test script
+  /tmp/retroarch_test.sh
+  rm -f /tmp/retroarch_test.sh
+fi
 
 # Start the service
 sudo systemctl start retropie-ha.service
@@ -236,11 +262,61 @@ echo "1. Machine status reporting (idle, playing, shutdown)"
 echo "2. Play duration tracking"
 echo "3. Text-to-speech functionality"
 echo "4. System availability tracking"
+echo "5. RetroArch Network Control Interface integration"
+echo "   - Display messages on RetroArch screen"
+echo "   - Send commands to RetroArch"
+echo "   - Get RetroArch status information"
 echo ""
 echo "You can send text-to-speech commands from Home Assistant by publishing to:"
 echo "  Topic: $MQTT_TOPIC_PREFIX/command/tts"
 echo "  Payload: \"Hello from Home Assistant\""
 echo "  or JSON: {\"text\": \"Hello from Home Assistant\"}"
+echo ""
+echo "RetroArch Network Control Interface commands can be sent via:"
+echo "  Message Display: $MQTT_TOPIC_PREFIX/command/retroarch/message"
+echo "  Status Request: $MQTT_TOPIC_PREFIX/command/retroarch/status"
+echo "  Any Command: $MQTT_TOPIC_PREFIX/command/retroarch"
+echo ""
+# Try to automatically enable RetroArch network commands
+echo "Setting up RetroArch Network Commands..."
+RETROARCH_CFG_PATHS=(
+  "$HOME/.config/retroarch/retroarch.cfg"
+  "/opt/retropie/configs/all/retroarch.cfg"
+  "/etc/retroarch.cfg"
+)
+
+RETROARCH_ENABLED=false
+for CFG_PATH in "${RETROARCH_CFG_PATHS[@]}"; do
+  if [ -f "$CFG_PATH" ]; then
+    echo "Found RetroArch config at: $CFG_PATH"
+    
+    # Check if network_cmd_enable is already set
+    if grep -q "network_cmd_enable" "$CFG_PATH"; then
+      # Update existing setting
+      sed -i 's/network_cmd_enable = "false"/network_cmd_enable = "true"/g' "$CFG_PATH"
+      echo "Updated network_cmd_enable setting to true in $CFG_PATH"
+    else
+      # Add the setting if it doesn't exist
+      echo 'network_cmd_enable = "true"' >> "$CFG_PATH"
+      echo "Added network_cmd_enable = true to $CFG_PATH"
+    fi
+    
+    # Optionally set the network command port if you want to use a specific port
+    if ! grep -q "network_cmd_port" "$CFG_PATH"; then
+      echo 'network_cmd_port = "55355"' >> "$CFG_PATH"
+      echo "Added default network_cmd_port = 55355 to $CFG_PATH"
+    fi
+    
+    RETROARCH_ENABLED=true
+    break
+  fi
+done
+
+if [ "$RETROARCH_ENABLED" = false ]; then
+  echo "WARNING: Could not find RetroArch configuration file."
+  echo "To enable RetroArch Network Commands manually, set:"
+  echo "network_cmd_enable = \"true\" in retroarch.cfg"
+fi
 echo ""
 echo "NOTE: A restart of EmulationStation is recommended:"
 echo "touch /tmp/es-restart && killall emulationstation"

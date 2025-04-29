@@ -30,6 +30,7 @@ CONFIG_DIR = os.path.expanduser('~/.config/retropie-ha')
 CONFIG_FILE = os.path.join(CONFIG_DIR, 'config.json')
 ROMS_DIR = os.path.expanduser('~/RetroPie/roms')
 STATE_FILE = os.path.join(CONFIG_DIR, 'state.json')
+RETROARCH_PORT = 55355  # Default RetroArch Network Control Interface port
 
 # Global state
 current_state = {
@@ -266,6 +267,11 @@ def publish_game_event(event_type, args=None):
         emulator = args[1]
         game_name = os.path.basename(rom_path)
         
+        # Verify RetroArch network commands are enabled for this game session
+        # This runs in a separate thread to avoid blocking the game launch
+        if 'retroarch' in emulator.lower():
+            threading.Thread(target=verify_retroarch_network_commands, daemon=True).start()
+        
         # Get additional game metadata
         metadata = get_game_metadata(system, rom_path)
         display_name = metadata.get('name', game_name)
@@ -441,81 +447,226 @@ def on_connect(client, userdata, flags, rc):
     """Callback when connected to MQTT broker"""
     logger.info(f"Connected to MQTT broker with result code {rc}")
     
-    # Subscribe to TTS command topic
+    # Get topic prefix from config
     topic_prefix = get_config().get('mqtt_topic_prefix', 'retropie')
-    client.subscribe(f"{topic_prefix}/command/tts")
-    logger.info(f"Subscribed to TTS command topic: {topic_prefix}/command/tts")
+    
+    # Subscribe to all command topics
+    command_topics = [
+        f"{topic_prefix}/command/tts",
+        f"{topic_prefix}/command/retroarch/status",
+        f"{topic_prefix}/command/retroarch/message",
+        f"{topic_prefix}/command/retroarch"
+    ]
+    
+    for topic in command_topics:
+        client.subscribe(topic)
+        logger.info(f"Subscribed to command topic: {topic}")
 
 def on_message(client, userdata, msg):
     """Callback when a message is received"""
     try:
         logger.info(f"Received message on topic {msg.topic}: {msg.payload.decode()}")
         
-        # Check if this is a TTS command
+        # Check the message topic to determine the action
         config = get_config()
         topic_prefix = config.get('mqtt_topic_prefix', 'retropie')
         
+        # Handle TTS command
         if msg.topic == f"{topic_prefix}/command/tts":
-            # Parse the TTS command
-            try:
-                command = json.loads(msg.payload.decode())
-                text = command.get('text', '')
-                
-                if text:
-                    # Execute text-to-speech
-                    logger.info(f"Executing TTS for text: {text}")
-                    threading.Thread(target=execute_tts, args=(text,)).start()
-                    
-                    # Send acknowledgment
-                    ack_topic = f"{topic_prefix}/command/tts/response"
-                    ack_payload = {
-                        'timestamp': int(time.time()),
-                        'status': 'success',
-                        'text': text
-                    }
-                    publish_mqtt_message(ack_topic, json.dumps(ack_payload), retain=False)
-                else:
-                    logger.error("Received TTS command without text")
-                    
-                    # Send error response
-                    ack_topic = f"{topic_prefix}/command/tts/response"
-                    ack_payload = {
-                        'timestamp': int(time.time()),
-                        'status': 'error',
-                        'message': 'No text provided'
-                    }
-                    publish_mqtt_message(ack_topic, json.dumps(ack_payload), retain=False)
-                    
-            except json.JSONDecodeError:
-                # Try to treat the payload as plain text
-                text = msg.payload.decode().strip()
-                if text:
-                    # Execute text-to-speech
-                    logger.info(f"Executing TTS for plain text: {text}")
-                    threading.Thread(target=execute_tts, args=(text,)).start()
-                    
-                    # Send acknowledgment
-                    ack_topic = f"{topic_prefix}/command/tts/response"
-                    ack_payload = {
-                        'timestamp': int(time.time()),
-                        'status': 'success',
-                        'text': text
-                    }
-                    publish_mqtt_message(ack_topic, json.dumps(ack_payload), retain=False)
-                else:
-                    logger.error("Received empty TTS command")
-                    
-                    # Send error response
-                    ack_topic = f"{topic_prefix}/command/tts/response"
-                    ack_payload = {
-                        'timestamp': int(time.time()),
-                        'status': 'error',
-                        'message': 'Empty text provided'
-                    }
-                    publish_mqtt_message(ack_topic, json.dumps(ack_payload), retain=False)
+            handle_tts_command(msg, topic_prefix)
+        
+        # Handle RetroArch status request
+        elif msg.topic == f"{topic_prefix}/command/retroarch/status":
+            handle_retroarch_status_command(msg, topic_prefix)
+        
+        # Handle RetroArch message display
+        elif msg.topic == f"{topic_prefix}/command/retroarch/message":
+            handle_retroarch_message_command(msg, topic_prefix)
+        
+        # Handle general RetroArch command
+        elif msg.topic == f"{topic_prefix}/command/retroarch":
+            handle_retroarch_command_message(msg, topic_prefix)
     
     except Exception as e:
         logger.error(f"Error processing message: {e}")
+
+def handle_tts_command(msg, topic_prefix):
+    """Handle TTS command message"""
+    try:
+        # Parse the TTS command
+        try:
+            command = json.loads(msg.payload.decode())
+            text = command.get('text', '')
+        except json.JSONDecodeError:
+            # Try to treat the payload as plain text
+            text = msg.payload.decode().strip()
+        
+        if text:
+            # Execute text-to-speech
+            logger.info(f"Executing TTS for text: {text}")
+            threading.Thread(target=execute_tts, args=(text,)).start()
+            
+            # Send acknowledgment
+            ack_topic = f"{topic_prefix}/command/tts/response"
+            ack_payload = {
+                'timestamp': int(time.time()),
+                'status': 'success',
+                'text': text
+            }
+            publish_mqtt_message(ack_topic, json.dumps(ack_payload), retain=False)
+        else:
+            logger.error("Received TTS command without text")
+            
+            # Send error response
+            ack_topic = f"{topic_prefix}/command/tts/response"
+            ack_payload = {
+                'timestamp': int(time.time()),
+                'status': 'error',
+                'message': 'No text provided'
+            }
+            publish_mqtt_message(ack_topic, json.dumps(ack_payload), retain=False)
+    except Exception as e:
+        logger.error(f"Error handling TTS command: {e}")
+
+def handle_retroarch_status_command(msg, topic_prefix):
+    """Handle RetroArch status command message"""
+    try:
+        # Get RetroArch status
+        status_info = get_retroarch_status()
+        
+        # Prepare response
+        ack_topic = f"{topic_prefix}/command/retroarch/status/response"
+        if status_info:
+            ack_payload = {
+                'timestamp': int(time.time()),
+                'status': 'success',
+                'data': status_info
+            }
+        else:
+            ack_payload = {
+                'timestamp': int(time.time()),
+                'status': 'error',
+                'message': 'Failed to get RetroArch status, check if RetroArch is running with Network Commands enabled'
+            }
+        publish_mqtt_message(ack_topic, json.dumps(ack_payload), retain=False)
+    except Exception as e:
+        logger.error(f"Error handling RetroArch status command: {e}")
+        # Send error response
+        ack_topic = f"{topic_prefix}/command/retroarch/status/response"
+        ack_payload = {
+            'timestamp': int(time.time()),
+            'status': 'error',
+            'message': f'Error: {str(e)}'
+        }
+        publish_mqtt_message(ack_topic, json.dumps(ack_payload), retain=False)
+
+def handle_retroarch_message_command(msg, topic_prefix):
+    """Handle RetroArch message display command"""
+    try:
+        # Parse the message command
+        try:
+            command = json.loads(msg.payload.decode())
+            message = command.get('message', '')
+        except json.JSONDecodeError:
+            # Try to treat the payload as plain text
+            message = msg.payload.decode().strip()
+        
+        if message:
+            # Display the message on RetroArch screen
+            logger.info(f"Displaying message on RetroArch: {message}")
+            success = display_retroarch_message(message)
+            
+            # Send acknowledgment
+            ack_topic = f"{topic_prefix}/command/retroarch/message/response"
+            if success:
+                ack_payload = {
+                    'timestamp': int(time.time()),
+                    'status': 'success',
+                    'message': message
+                }
+            else:
+                ack_payload = {
+                    'timestamp': int(time.time()),
+                    'status': 'error',
+                    'message': 'Failed to display message, check if RetroArch is running with Network Commands enabled'
+                }
+            publish_mqtt_message(ack_topic, json.dumps(ack_payload), retain=False)
+        else:
+            logger.error("Received RetroArch message command without text")
+            
+            # Send error response
+            ack_topic = f"{topic_prefix}/command/retroarch/message/response"
+            ack_payload = {
+                'timestamp': int(time.time()),
+                'status': 'error',
+                'message': 'No message provided'
+            }
+            publish_mqtt_message(ack_topic, json.dumps(ack_payload), retain=False)
+    except Exception as e:
+        logger.error(f"Error handling RetroArch message command: {e}")
+        # Send error response
+        ack_topic = f"{topic_prefix}/command/retroarch/message/response"
+        ack_payload = {
+            'timestamp': int(time.time()),
+            'status': 'error',
+            'message': f'Error: {str(e)}'
+        }
+        publish_mqtt_message(ack_topic, json.dumps(ack_payload), retain=False)
+
+def handle_retroarch_command_message(msg, topic_prefix):
+    """Handle generic RetroArch command"""
+    try:
+        # Parse the command
+        try:
+            command_obj = json.loads(msg.payload.decode())
+            command = command_obj.get('command', '')
+        except json.JSONDecodeError:
+            # Try to treat the payload as plain text
+            command = msg.payload.decode().strip()
+        
+        if command:
+            # Send the command to RetroArch
+            logger.info(f"Sending command to RetroArch: {command}")
+            result = send_retroarch_command(command)
+            
+            # Send acknowledgment
+            ack_topic = f"{topic_prefix}/command/retroarch/response"
+            if result is not None:
+                ack_payload = {
+                    'timestamp': int(time.time()),
+                    'status': 'success',
+                    'command': command,
+                    'response': result if isinstance(result, str) else ''
+                }
+            else:
+                ack_payload = {
+                    'timestamp': int(time.time()),
+                    'status': 'error',
+                    'command': command,
+                    'message': 'Failed to send command, check if RetroArch is running with Network Commands enabled'
+                }
+            publish_mqtt_message(ack_topic, json.dumps(ack_payload), retain=False)
+        else:
+            logger.error("Received RetroArch command without any command")
+            
+            # Send error response
+            ack_topic = f"{topic_prefix}/command/retroarch/response"
+            ack_payload = {
+                'timestamp': int(time.time()),
+                'status': 'error',
+                'message': 'No command provided'
+            }
+            publish_mqtt_message(ack_topic, json.dumps(ack_payload), retain=False)
+    except Exception as e:
+        logger.error(f"Error handling RetroArch command: {e}")
+        # Send error response
+        ack_topic = f"{topic_prefix}/command/retroarch/response"
+        ack_payload = {
+            'timestamp': int(time.time()),
+            'status': 'error',
+            'message': f'Error: {str(e)}'
+        }
+        publish_mqtt_message(ack_topic, json.dumps(ack_payload), retain=False)
 
 def execute_tts(text):
     """Execute text-to-speech using system speakers"""
@@ -536,6 +687,128 @@ def execute_tts(text):
     except Exception as e:
         logger.error(f"Error executing TTS: {e}")
         return False
+
+def verify_retroarch_network_commands():
+    """Verify that RetroArch has network commands enabled and set it if not"""
+    try:
+        # Common paths for RetroArch configuration
+        retroarch_cfg_paths = [
+            os.path.expanduser('~/.config/retroarch/retroarch.cfg'),
+            '/opt/retropie/configs/all/retroarch.cfg',
+            '/etc/retroarch.cfg'
+        ]
+        
+        for cfg_path in retroarch_cfg_paths:
+            if os.path.exists(cfg_path):
+                logger.info(f"Found RetroArch config at: {cfg_path}")
+                
+                # Check if we need to modify the config
+                modified = False
+                
+                # Read the current config
+                with open(cfg_path, 'r') as f:
+                    config_lines = f.readlines()
+                
+                # Check for network_cmd_enable setting
+                has_network_enable = False
+                for i, line in enumerate(config_lines):
+                    if 'network_cmd_enable' in line:
+                        has_network_enable = True
+                        if 'false' in line.lower():
+                            config_lines[i] = 'network_cmd_enable = "true"\n'
+                            modified = True
+                            logger.info("Updated network_cmd_enable to true")
+                
+                # Add network_cmd_enable if it doesn't exist
+                if not has_network_enable:
+                    config_lines.append('network_cmd_enable = "true"\n')
+                    modified = True
+                    logger.info("Added network_cmd_enable = true")
+                
+                # Check for network_cmd_port setting
+                has_network_port = False
+                for line in config_lines:
+                    if 'network_cmd_port' in line:
+                        has_network_port = True
+                
+                # Add network_cmd_port if it doesn't exist
+                if not has_network_port:
+                    config_lines.append(f'network_cmd_port = "{RETROARCH_PORT}"\n')
+                    modified = True
+                    logger.info(f"Added network_cmd_port = {RETROARCH_PORT}")
+                
+                # Write back the modified config if changes were made
+                if modified:
+                    try:
+                        with open(cfg_path, 'w') as f:
+                            f.writelines(config_lines)
+                        logger.info(f"Updated RetroArch config at {cfg_path}")
+                    except Exception as write_err:
+                        logger.error(f"Error writing RetroArch config: {write_err}")
+                
+                # We found and processed a config file, so we're done
+                return True
+        
+        logger.warning("Could not find RetroArch configuration file")
+        return False
+    except Exception as e:
+        logger.error(f"Error verifying RetroArch network commands: {e}")
+        return False
+
+def send_retroarch_command(command):
+    """Send a command to RetroArch via Network Control Interface"""
+    try:
+        # Create a UDP socket
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.settimeout(1.0)  # Set a 1-second timeout
+        
+        # Send the command
+        sock.sendto(command.encode(), ('127.0.0.1', RETROARCH_PORT))
+        
+        # For commands that expect a response, wait for it
+        if command in ["VERSION", "GET_STATUS", "GET_CONFIG_PARAM"]:
+            try:
+                response, addr = sock.recvfrom(1024)
+                return response.decode().strip()
+            except socket.timeout:
+                logger.warning(f"Timeout waiting for response to command: {command}")
+                return None
+        
+        return True
+    except Exception as e:
+        logger.error(f"Error sending RetroArch command: {e}")
+        return None
+    finally:
+        sock.close()
+
+def display_retroarch_message(message):
+    """Display a message on the RetroArch screen"""
+    try:
+        # The SHOW_MESG command requires the message in a specific format
+        command = f"SHOW_MESG {message}"
+        result = send_retroarch_command(command)
+        return result is not None
+    except Exception as e:
+        logger.error(f"Error displaying RetroArch message: {e}")
+        return False
+
+def get_retroarch_status():
+    """Get the current status of RetroArch"""
+    try:
+        response = send_retroarch_command("GET_STATUS")
+        if response:
+            # Parse the response
+            status_info = {}
+            lines = response.split('\n')
+            for line in lines:
+                if ':' in line:
+                    key, value = line.split(':', 1)
+                    status_info[key.strip()] = value.strip()
+            return status_info
+        return None
+    except Exception as e:
+        logger.error(f"Error getting RetroArch status: {e}")
+        return None
 
 def start_mqtt_listener():
     """Start a background MQTT listener for commands"""
@@ -826,6 +1099,84 @@ def register_with_ha():
             retain=True
         )
         logger.info(f"Published TTS service config")
+        
+        # Register RetroArch message service
+        retroarch_message_config = {
+            "automation_type": "trigger",
+            "type": "action",
+            "subtype": "retroarch_message",
+            "device": device_info,
+            "topic": f"{topic_prefix}/command/retroarch/message",
+            "availability": availability,
+            "payload": "{{payload}}",
+            "payload_template": "{{payload_template}}",
+            "value_template": "{{value}}",
+            "name": f"RetroPie {device_name} RetroArch Message",
+            "unique_id": f"retropie_{safe_device_name}_retroarch_message",
+            "icon": "mdi:message-text",
+            "enabled_by_default": True,
+            "origin": origin_info
+        }
+        
+        client.publish(
+            f"homeassistant/device_automation/retropie_{safe_device_name}/retroarch_message/config",
+            json.dumps(retroarch_message_config),
+            qos=1,
+            retain=True
+        )
+        logger.info(f"Published RetroArch message service config")
+        
+        # Register RetroArch command service
+        retroarch_command_config = {
+            "automation_type": "trigger",
+            "type": "action",
+            "subtype": "retroarch_command",
+            "device": device_info,
+            "topic": f"{topic_prefix}/command/retroarch",
+            "availability": availability,
+            "payload": "{{payload}}",
+            "payload_template": "{{payload_template}}",
+            "value_template": "{{value}}",
+            "name": f"RetroPie {device_name} RetroArch Command",
+            "unique_id": f"retropie_{safe_device_name}_retroarch_command",
+            "icon": "mdi:gamepad-variant",
+            "enabled_by_default": True,
+            "origin": origin_info
+        }
+        
+        client.publish(
+            f"homeassistant/device_automation/retropie_{safe_device_name}/retroarch_command/config",
+            json.dumps(retroarch_command_config),
+            qos=1,
+            retain=True
+        )
+        logger.info(f"Published RetroArch command service config")
+        
+        # Register RetroArch status service
+        retroarch_status_config = {
+            "automation_type": "trigger",
+            "type": "action",
+            "subtype": "retroarch_status",
+            "device": device_info,
+            "topic": f"{topic_prefix}/command/retroarch/status",
+            "availability": availability,
+            "payload": "{{payload}}",
+            "payload_template": "{{payload_template}}",
+            "value_template": "{{value}}",
+            "name": f"RetroPie {device_name} RetroArch Status",
+            "unique_id": f"retropie_{safe_device_name}_retroarch_status",
+            "icon": "mdi:information-outline",
+            "enabled_by_default": True,
+            "origin": origin_info
+        }
+        
+        client.publish(
+            f"homeassistant/device_automation/retropie_{safe_device_name}/retroarch_status/config",
+            json.dumps(retroarch_status_config),
+            qos=1,
+            retain=True
+        )
+        logger.info(f"Published RetroArch status service config")
         
         # Also publish an initial status message to make the sensors available immediately
         status_payload = {

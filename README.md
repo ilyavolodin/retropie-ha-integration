@@ -9,6 +9,9 @@ This project provides integration between RetroPie and Home Assistant, allowing 
 - Monitor system events (startup, shutdown, game selection)
 - Track machine status (idle, playing, shutdown)
 - Use text-to-speech to make announcements through your RetroPie
+- Control RetroArch via network commands
+- Display messages directly on the RetroArch screen
+- Get RetroArch status information in real-time
 - Display real-time information in Home Assistant
 - Trigger automations based on game events
 
@@ -21,6 +24,11 @@ This project provides integration between RetroPie and Home Assistant, allowing 
 - Machine status tracking (idle, playing, shutdown)
 - Game start time and play duration tracking
 - Text-to-speech service that can be triggered from Home Assistant
+- RetroArch Network Control Interface integration for:
+  - Sending any RetroArch command
+  - Displaying on-screen messages
+  - Retrieving RetroArch status information
+  - Automatic configuration of RetroArch network commands
 - Proper availability reporting for all entities
 - CPU and temperature monitoring
 - Memory and CPU usage reporting
@@ -79,6 +87,7 @@ This integration uses:
 7. **Machine status management** - The system keeps track of whether the console is idle, playing, or shut down
 8. **Play duration tracking** - Game start times are recorded to calculate play duration
 9. **Text-to-speech service** - Converts text from MQTT commands to speech using pico2wave and aplay
+10. **RetroArch Network Control** - Direct integration with RetroArch's Network Control Interface for commands and status
 
 ## Home Assistant Integration
 
@@ -99,6 +108,9 @@ The integration creates the following entities in Home Assistant:
 The integration also creates the following services in Home Assistant:
 
 - **Text-to-Speech (TTS)** - Send text to be spoken through the RetroPie speakers
+- **RetroArch Message** - Display a message on the RetroArch screen
+- **RetroArch Command** - Send any command to RetroArch
+- **RetroArch Status** - Get current status information from RetroArch
 
 ## Using Text-to-Speech
 
@@ -126,6 +138,73 @@ You can use the text-to-speech service from Home Assistant to make announcements
              topic: retropie/command/tts
              payload_template: '{"text": "Now playing {{ states.sensor.retropie_game_status.attributes.name }}"}'
    ```
+
+## Using RetroArch Network Control
+
+The integration provides direct access to RetroArch's Network Control Interface from Home Assistant. This allows you to control RetroArch directly through MQTT commands.
+
+The installation process automatically:
+1. Detects the RetroArch configuration file
+2. Enables network commands (`network_cmd_enable = "true"`)
+3. Sets the network command port (`network_cmd_port = "55355"`)
+4. Tests the connection to RetroArch during installation
+
+Additionally, when a game is launched through RetroArch, the integration verifies the network commands are enabled and configures them if needed.
+
+### Displaying Messages on RetroArch Screen
+
+1. **Home Assistant Service Call**:
+   - Service: `mqtt.publish`
+   - Data:
+     ```yaml
+     topic: retropie/command/retroarch/message
+     payload: '{"message": "Your message to display on RetroArch"}'
+     ```
+
+2. **Example Automation**:
+   ```yaml
+   automation:
+     - alias: "Display Achievement on RetroArch"
+       trigger:
+         - platform: state
+           entity_id: sensor.retropie_play_duration
+           above: 3600  # 1 hour of play
+       action:
+         - service: mqtt.publish
+           data:
+             topic: retropie/command/retroarch/message
+             payload: '{"message": "Achievement Unlocked: Dedicated Gamer!"}'
+   ```
+
+### Getting RetroArch Status
+
+1. **Home Assistant Service Call**:
+   - Service: `mqtt.publish`
+   - Data:
+     ```yaml
+     topic: retropie/command/retroarch/status
+     payload: '{}'
+     ```
+
+   - Response will be published to: `retropie/command/retroarch/status/response`
+
+### Sending RetroArch Commands
+
+1. **Home Assistant Service Call**:
+   - Service: `mqtt.publish`
+   - Data:
+     ```yaml
+     topic: retropie/command/retroarch
+     payload: '{"command": "COMMAND_NAME"}'  # Replace COMMAND_NAME with any command from the RetroArch Network Control Interface
+     ```
+
+2. **Example Commands**:
+   - `PAUSE_TOGGLE` - Pause or unpause the current game
+   - `RESET` - Reset the current game
+   - `SCREENSHOT` - Take a screenshot
+   - `VOLUME_UP` / `VOLUME_DOWN` - Adjust volume
+   - `SAVE_STATE` / `LOAD_STATE` - Save or load state
+   - See the RetroArch documentation for a complete list of available commands
 
 ## Troubleshooting
 
