@@ -1,0 +1,207 @@
+#!/bin/bash
+# Installation script for RetroPie Home Assistant Integration
+
+set -e
+
+# Configuration
+CONFIG_DIR="$HOME/.config/retropie-ha"
+ES_SCRIPTS_DIR="$HOME/.emulationstation/scripts"
+RC_SCRIPTS_DIR="/opt/retropie/configs/all"
+
+# Display banner
+echo "============================================="
+echo "  RetroPie Home Assistant Integration Setup  "
+echo "============================================="
+echo ""
+
+# Ask for MQTT server information
+read -p "MQTT Server Host [192.168.1.100]: " MQTT_HOST
+MQTT_HOST=${MQTT_HOST:-192.168.1.100}
+
+read -p "MQTT Server Port [1883]: " MQTT_PORT
+MQTT_PORT=${MQTT_PORT:-1883}
+
+read -p "MQTT Username (leave empty for none): " MQTT_USERNAME
+
+if [ -n "$MQTT_USERNAME" ]; then
+    read -s -p "MQTT Password: " MQTT_PASSWORD
+    echo ""
+fi
+
+read -p "MQTT Topic Prefix [retropie/arcade]: " MQTT_TOPIC_PREFIX
+MQTT_TOPIC_PREFIX=${MQTT_TOPIC_PREFIX:-retropie/arcade}
+
+read -p "Device Name [arcade]: " DEVICE_NAME
+DEVICE_NAME=${DEVICE_NAME:-arcade}
+
+read -p "Status Update Interval (seconds) [30]: " UPDATE_INTERVAL
+UPDATE_INTERVAL=${UPDATE_INTERVAL:-30}
+
+# Update config.json
+mkdir -p "$CONFIG_DIR"
+cat > "$CONFIG_DIR/config.json" << EOL
+{
+  "mqtt_host": "$MQTT_HOST",
+  "mqtt_port": $MQTT_PORT,
+  "mqtt_username": "$MQTT_USERNAME",
+  "mqtt_password": "$MQTT_PASSWORD",
+  "mqtt_topic_prefix": "$MQTT_TOPIC_PREFIX",
+  "device_name": "$DEVICE_NAME",
+  "update_interval": $UPDATE_INTERVAL
+}
+EOL
+
+echo "Configuration updated."
+echo "Installing integration..."
+
+# Complete removal of existing service (if present)
+if systemctl is-active --quiet retropie-ha.service 2>/dev/null; then 
+    echo "Stopping existing service..."
+    sudo systemctl stop retropie-ha.service
+    sudo systemctl disable retropie-ha.service
+    echo "Service stopped and disabled."
+fi
+
+if [ -f /etc/systemd/system/retropie-ha.service ]; then
+    echo "Removing existing service file..."
+    sudo rm -f /etc/systemd/system/retropie-ha.service
+    sudo systemctl daemon-reload
+    echo "Service file removed."
+fi
+
+# Clean up any existing PID file
+if [ -f "$CONFIG_DIR/reporter.pid" ]; then
+    echo "Cleaning up old PID file..."
+    # Check if the process is still running and kill it
+    OLD_PID=$(cat "$CONFIG_DIR/reporter.pid")
+    if kill -0 $OLD_PID 2>/dev/null; then
+        echo "Terminating old process (PID: $OLD_PID)..."
+        kill $OLD_PID
+    fi
+    rm -f "$CONFIG_DIR/reporter.pid"
+fi
+
+# Create directories
+echo "Creating directories..."
+mkdir -p "$CONFIG_DIR" 
+mkdir -p "$ES_SCRIPTS_DIR/game-start" "$ES_SCRIPTS_DIR/game-end" "$ES_SCRIPTS_DIR/game-select" "$ES_SCRIPTS_DIR/system-select" "$ES_SCRIPTS_DIR/quit"
+sudo mkdir -p "$RC_SCRIPTS_DIR/runcommand-onstart" "$RC_SCRIPTS_DIR/runcommand-onend"
+
+# Install dependencies
+echo "Installing dependencies..."
+sudo apt-get update && sudo apt-get install -y python3-paho-mqtt mosquitto-clients
+
+# Copy Python scripts
+echo "Copying Python scripts..."
+cp -f "$(dirname "$0")/src/mqtt_client.py" "$CONFIG_DIR/mqtt_client.py"
+cp -f "$(dirname "$0")/src/status_reporter.py" "$CONFIG_DIR/status_reporter.py"
+chmod +x "$CONFIG_DIR/mqtt_client.py" "$CONFIG_DIR/status_reporter.py"
+
+# Copy EmulationStation scripts
+echo "Installing EmulationStation scripts..."
+cp -f "$(dirname "$0")/scripts/game-start/"* "$ES_SCRIPTS_DIR/game-start/"
+cp -f "$(dirname "$0")/scripts/game-end/"* "$ES_SCRIPTS_DIR/game-end/"
+cp -f "$(dirname "$0")/scripts/game-select/"* "$ES_SCRIPTS_DIR/game-select/"
+cp -f "$(dirname "$0")/scripts/system-select/"* "$ES_SCRIPTS_DIR/system-select/"
+cp -f "$(dirname "$0")/scripts/quit/"* "$ES_SCRIPTS_DIR/quit/"
+chmod +x "$ES_SCRIPTS_DIR"/*/*.sh
+
+# Copy RunCommand scripts
+echo "Installing RunCommand scripts..."
+cp -f "$(dirname "$0")/scripts/game-start/"* "$RC_SCRIPTS_DIR/runcommand-onstart/"
+cp -f "$(dirname "$0")/scripts/game-end/"* "$RC_SCRIPTS_DIR/runcommand-onend/"
+chmod +x "$RC_SCRIPTS_DIR/runcommand-onstart/"* "$RC_SCRIPTS_DIR/runcommand-onend/"*
+
+# Create RunCommand hooks
+echo "Creating RunCommand hooks..."
+cat > "$RC_SCRIPTS_DIR/runcommand-onstart.sh" << 'EOF'
+#!/bin/bash
+# Log the event
+echo "[$(date)] RunCommand OnStart: $@" >> /tmp/retropie_events.log
+# Call the report script
+/opt/retropie/configs/all/runcommand-onstart/01_report_game_start.sh "$@"
+EOF
+
+cat > "$RC_SCRIPTS_DIR/runcommand-onend.sh" << 'EOF'
+#!/bin/bash
+# Log the event
+echo "[$(date)] RunCommand OnEnd: $@" >> /tmp/retropie_events.log
+# Call the report script
+/opt/retropie/configs/all/runcommand-onend/01_report_game_end.sh "$@"
+EOF
+
+# Set permissions for RunCommand hooks
+chmod +x "$RC_SCRIPTS_DIR/runcommand-onstart.sh" "$RC_SCRIPTS_DIR/runcommand-onend.sh"
+
+# Fix EmulationStation audio mixer issue
+echo "Fixing EmulationStation audio mixer issue..."
+ES_SETTINGS="$HOME/.emulationstation/es_settings.cfg"
+if [ -f "$ES_SETTINGS" ]; then
+    # Create backup
+    cp -f "$ES_SETTINGS" "$ES_SETTINGS.bak"
+    # Remove existing VolumeControl entries and add our own
+    cat "$ES_SETTINGS" | grep -v "VolumeControl" > "$ES_SETTINGS.new"
+    echo '<bool name="VolumeControl" value="false" />' >> "$ES_SETTINGS.new"
+    mv "$ES_SETTINGS.new" "$ES_SETTINGS"
+    echo "EmulationStation audio mixer settings updated."
+fi
+
+# Create and install systemd service
+echo "Creating systemd service..."
+CURRENT_USER=$(whoami)
+HOME_DIR=$(eval echo ~$CURRENT_USER)
+
+# Create service file with correct paths
+cat > /tmp/retropie-ha.service << EOF
+[Unit]
+Description=RetroPie Home Assistant Integration
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=$CURRENT_USER
+WorkingDirectory=$HOME_DIR
+ExecStart=/usr/bin/python3 $CONFIG_DIR/status_reporter.py
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# Install service
+echo "Installing systemd service..."
+sudo mv /tmp/retropie-ha.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable retropie-ha.service
+sudo systemctl start retropie-ha.service
+
+# Register with Home Assistant
+echo "Registering with Home Assistant..."
+python3 "$CONFIG_DIR/mqtt_client.py" --register
+
+# Verify installation
+echo "Verifying installation..."
+sleep 2
+if systemctl is-active --quiet retropie-ha.service; then
+    echo "Service is running correctly."
+else
+    echo "Service failed to start. Check logs with: sudo journalctl -u retropie-ha.service"
+fi
+
+echo ""
+echo "Installation completed successfully!"
+echo "The RetroPie Home Assistant Integration is now running."
+echo ""
+echo "To check status: sudo systemctl status retropie-ha.service"
+echo "To view logs: sudo journalctl -u retropie-ha.service"
+echo "To view integration logs: cat $CONFIG_DIR/retropie-ha.log"
+echo ""
+echo "Your RetroPie will now report events and status to Home Assistant via MQTT."
+echo "Home Assistant should auto-discover the sensors if MQTT integration is configured."
+echo ""
+echo "NOTE: A restart of EmulationStation is recommended:"
+echo "touch /tmp/es-restart && killall emulationstation"
