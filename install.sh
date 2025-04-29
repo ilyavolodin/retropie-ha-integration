@@ -54,7 +54,8 @@ EOL
 echo "Configuration updated."
 echo "Installing integration..."
 
-# Complete removal of existing service (if present)
+# Check for existing installation and remove it if found
+echo "Checking for existing installation..."
 if systemctl is-active --quiet retropie-ha.service 2>/dev/null; then 
     echo "Stopping existing service..."
     sudo systemctl stop retropie-ha.service
@@ -89,7 +90,7 @@ sudo mkdir -p "$RC_SCRIPTS_DIR/runcommand-onstart" "$RC_SCRIPTS_DIR/runcommand-o
 
 # Install dependencies
 echo "Installing dependencies..."
-sudo apt-get update && sudo apt-get install -y python3-paho-mqtt mosquitto-clients
+sudo apt-get update && sudo apt-get install -y python3-paho-mqtt mosquitto-clients libttspico-utils alsa-utils
 
 # Copy Python scripts
 echo "Copying Python scripts..."
@@ -187,19 +188,27 @@ if [ -n "$MQTT_USERNAME" ]; then
     mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/sensor/retropie_${DEVICE_NAME// /_}/game_status/config" -n -r -d
     mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/sensor/retropie_${DEVICE_NAME// /_}/memory_usage/config" -n -r -d
     mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/sensor/retropie_${DEVICE_NAME// /_}/cpu_load/config" -n -r -d
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/sensor/retropie_${DEVICE_NAME// /_}/machine_status/config" -n -r -d
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/sensor/retropie_${DEVICE_NAME// /_}/play_duration/config" -n -r -d
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/device_automation/retropie_${DEVICE_NAME// /_}/tts/config" -n -r -d
 else
     mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/sensor/retropie_${DEVICE_NAME// /_}/cpu_temp/config" -n -r -d
     mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/sensor/retropie_${DEVICE_NAME// /_}/gpu_temp/config" -n -r -d
     mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/sensor/retropie_${DEVICE_NAME// /_}/game_status/config" -n -r -d
     mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/sensor/retropie_${DEVICE_NAME// /_}/memory_usage/config" -n -r -d
     mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/sensor/retropie_${DEVICE_NAME// /_}/cpu_load/config" -n -r -d
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/sensor/retropie_${DEVICE_NAME// /_}/machine_status/config" -n -r -d
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/sensor/retropie_${DEVICE_NAME// /_}/play_duration/config" -n -r -d
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/device_automation/retropie_${DEVICE_NAME// /_}/tts/config" -n -r -d
 fi
 
-# Register with Home Assistant
-echo "Registering with Home Assistant..."
-python3 "$CONFIG_DIR/mqtt_client.py" --register
+# Test audio for text-to-speech
+echo "Testing text-to-speech functionality..."
+TTS_TEXT="RetroPie Home Assistant integration is now installed."
+pico2wave -w /tmp/tts_test.wav "$TTS_TEXT" && aplay /tmp/tts_test.wav
+rm -f /tmp/tts_test.wav
 
-# Start the service after registration
+# Start the service
 sudo systemctl start retropie-ha.service
 
 # Verify installation
@@ -222,9 +231,16 @@ echo ""
 echo "Your RetroPie will now report events and status to Home Assistant via MQTT."
 echo "Home Assistant should auto-discover the sensors if MQTT integration is configured."
 echo ""
+echo "New features:"
+echo "1. Machine status reporting (idle, playing, shutdown)"
+echo "2. Play duration tracking"
+echo "3. Text-to-speech functionality"
+echo "4. System availability tracking"
+echo ""
+echo "You can send text-to-speech commands from Home Assistant by publishing to:"
+echo "  Topic: $MQTT_TOPIC_PREFIX/command/tts"
+echo "  Payload: \"Hello from Home Assistant\""
+echo "  or JSON: {\"text\": \"Hello from Home Assistant\"}"
+echo ""
 echo "NOTE: A restart of EmulationStation is recommended:"
 echo "touch /tmp/es-restart && killall emulationstation"
-echo ""
-echo "TIP: If Home Assistant doesn't auto-discover the integration,"
-echo "you may need to restart Home Assistant or check that MQTT discovery"
-echo "is enabled in your Home Assistant configuration."
