@@ -298,7 +298,8 @@ def publish_game_event(event_type, args=None):
             payload.update({'quit_mode': args[0]})
     
     topic = f"{topic_prefix}/event/{event_type}"
-    return publish_mqtt_message(topic, json.dumps(payload))
+    # Events should NOT be retained - they should expire when received
+    return publish_mqtt_message(topic, json.dumps(payload), retain=False)
 
 def publish_system_status():
     """Publish system status information to MQTT"""
@@ -313,7 +314,12 @@ def publish_system_status():
     }
     
     topic = f"{topic_prefix}/status"
+    # Status updates should be retained so they're available immediately
     return publish_mqtt_message(topic, json.dumps(payload), retain=True)
+
+def on_connect(client, userdata, flags, rc):
+    """Callback when connected to MQTT broker"""
+    logger.info(f"Connected to MQTT broker with result code {rc}")
 
 def register_with_ha():
     """Register device with Home Assistant via MQTT discovery"""
@@ -321,9 +327,12 @@ def register_with_ha():
     topic_prefix = config.get('mqtt_topic_prefix', 'retropie')
     device_name = config.get('device_name', socket.gethostname())
     
+    # Clean device_name to avoid issues with MQTT topics
+    safe_device_name = re.sub(r'[^a-zA-Z0-9_]', '_', device_name)
+    
     # Create device information
     device_info = {
-        "identifiers": [f"retropie_{device_name}"],
+        "identifiers": [f"retropie_{safe_device_name}"],
         "name": f"RetroPie {device_name}",
         "model": "RetroPie Arcade",
         "manufacturer": "RetroPie",
@@ -334,7 +343,7 @@ def register_with_ha():
     cpu_temp_config = {
         "device": device_info,
         "name": f"RetroPie {device_name} CPU Temperature",
-        "unique_id": f"retropie_{device_name}_cpu_temp",
+        "unique_id": f"retropie_{safe_device_name}_cpu_temp",
         "state_topic": f"{topic_prefix}/status",
         "value_template": "{{ value_json.system_info.cpu_temp }}",
         "unit_of_measurement": "°C",
@@ -347,7 +356,7 @@ def register_with_ha():
     gpu_temp_config = {
         "device": device_info,
         "name": f"RetroPie {device_name} GPU Temperature",
-        "unique_id": f"retropie_{device_name}_gpu_temp",
+        "unique_id": f"retropie_{safe_device_name}_gpu_temp",
         "state_topic": f"{topic_prefix}/status",
         "value_template": "{{ value_json.system_info.gpu_temp }}",
         "unit_of_measurement": "°C",
@@ -360,65 +369,121 @@ def register_with_ha():
     game_status_config = {
         "device": device_info,
         "name": f"RetroPie {device_name} Game Status",
-        "unique_id": f"retropie_{device_name}_game_status",
+        "unique_id": f"retropie_{safe_device_name}_game_status",
         "state_topic": f"{topic_prefix}/event/game-start",
-        "value_template": "{{ value_json.game_name }}",
+        "value_template": "{{ value_json.game_name if 'game_name' in value_json else 'None' }}",
         "json_attributes_topic": f"{topic_prefix}/event/game-start",
-        "json_attributes_template": "{{ {'description': value_json.description, 'system': value_json.system, 'emulator': value_json.emulator, 'genre': value_json.genre, 'developer': value_json.developer, 'publisher': value_json.publisher, 'rating': value_json.rating, 'releasedate': value_json.releasedate} | tojson }}",
-        "icon": "mdi:gamepad-variant"
+        "json_attributes_template": "{{ {'description': value_json.description if 'description' in value_json else '', 'system': value_json.system if 'system' in value_json else '', 'emulator': value_json.emulator if 'emulator' in value_json else '', 'genre': value_json.genre if 'genre' in value_json else '', 'developer': value_json.developer if 'developer' in value_json else '', 'publisher': value_json.publisher if 'publisher' in value_json else '', 'rating': value_json.rating if 'rating' in value_json else '', 'releasedate': value_json.releasedate if 'releasedate' in value_json else '' } | tojson }}",
+        "icon": "mdi:gamepad-variant",
+        "availability_topic": f"{topic_prefix}/status",
+        "availability_template": "{{ 'online' }}",
+        "payload_available": "online",
+        "payload_not_available": "offline"
     }
     
     # Register memory usage sensor
     memory_usage_config = {
         "device": device_info,
         "name": f"RetroPie {device_name} Memory Usage",
-        "unique_id": f"retropie_{device_name}_memory_usage",
+        "unique_id": f"retropie_{safe_device_name}_memory_usage",
         "state_topic": f"{topic_prefix}/status",
         "value_template": "{{ value_json.system_info.memory.used / value_json.system_info.memory.total * 100 }}",
         "unit_of_measurement": "%",
-        "icon": "mdi:memory"
+        "icon": "mdi:memory",
+        "state_class": "measurement"
     }
     
     # Register CPU load sensor
     cpu_load_config = {
         "device": device_info,
         "name": f"RetroPie {device_name} CPU Load",
-        "unique_id": f"retropie_{device_name}_cpu_load",
+        "unique_id": f"retropie_{safe_device_name}_cpu_load",
         "state_topic": f"{topic_prefix}/status",
         "value_template": "{{ value_json.system_info.load[0] }}",
-        "icon": "mdi:chip"
+        "icon": "mdi:chip",
+        "state_class": "measurement"
     }
     
-    # Publish discovery messages
-    publish_mqtt_message(
-        f"homeassistant/sensor/retropie_{device_name}/cpu_temp/config",
-        json.dumps(cpu_temp_config),
-        retain=True
-    )
+    # Create an active client to ensure connection before publishing
+    client = mqtt.Client()
+    client.on_connect = on_connect
     
-    publish_mqtt_message(
-        f"homeassistant/sensor/retropie_{device_name}/gpu_temp/config",
-        json.dumps(gpu_temp_config),
-        retain=True
-    )
+    if config.get('mqtt_username') and config.get('mqtt_password'):
+        client.username_pw_set(config['mqtt_username'], config['mqtt_password'])
     
-    publish_mqtt_message(
-        f"homeassistant/sensor/retropie_{device_name}/game_status/config",
-        json.dumps(game_status_config),
-        retain=True
-    )
-    
-    publish_mqtt_message(
-        f"homeassistant/sensor/retropie_{device_name}/memory_usage/config",
-        json.dumps(memory_usage_config),
-        retain=True
-    )
-    
-    publish_mqtt_message(
-        f"homeassistant/sensor/retropie_{device_name}/cpu_load/config",
-        json.dumps(cpu_load_config),
-        retain=True
-    )
+    try:
+        # Connect to broker and wait for on_connect callback
+        client.connect(config['mqtt_host'], int(config.get('mqtt_port', 1883)), 60)
+        client.loop_start()
+        time.sleep(1)  # Give time for the connection to establish
+        
+        # Publish all discovery messages with retain flag set to True
+        # This ensures they persist in the broker
+        client.publish(
+            f"homeassistant/sensor/retropie_{safe_device_name}/cpu_temp/config",
+            json.dumps(cpu_temp_config),
+            qos=1,
+            retain=True
+        )
+        logger.info(f"Published CPU temperature sensor config")
+        
+        client.publish(
+            f"homeassistant/sensor/retropie_{safe_device_name}/gpu_temp/config",
+            json.dumps(gpu_temp_config),
+            qos=1,
+            retain=True
+        )
+        logger.info(f"Published GPU temperature sensor config")
+        
+        client.publish(
+            f"homeassistant/sensor/retropie_{safe_device_name}/game_status/config",
+            json.dumps(game_status_config),
+            qos=1,
+            retain=True
+        )
+        logger.info(f"Published game status sensor config")
+        
+        client.publish(
+            f"homeassistant/sensor/retropie_{safe_device_name}/memory_usage/config",
+            json.dumps(memory_usage_config),
+            qos=1,
+            retain=True
+        )
+        logger.info(f"Published memory usage sensor config")
+        
+        client.publish(
+            f"homeassistant/sensor/retropie_{safe_device_name}/cpu_load/config",
+            json.dumps(cpu_load_config),
+            qos=1,
+            retain=True
+        )
+        logger.info(f"Published CPU load sensor config")
+        
+        # Also publish an initial status message to make the sensors available immediately
+        status_payload = {
+            'timestamp': int(time.time()),
+            'device': device_name,
+            'system_info': get_system_info()
+        }
+        client.publish(
+            f"{topic_prefix}/status",
+            json.dumps(status_payload),
+            qos=1,
+            retain=True
+        )
+        logger.info(f"Published initial status update")
+        
+        # Disconnect cleanly
+        time.sleep(2)  # Give time for messages to be delivered
+        client.loop_stop()
+        client.disconnect()
+        return True
+    except Exception as e:
+        logger.error(f"Error registering with Home Assistant: {e}")
+        if client.is_connected():
+            client.loop_stop()
+            client.disconnect()
+        return False
 
 if __name__ == '__main__':
     # Ensure config directory exists
@@ -433,7 +498,11 @@ if __name__ == '__main__':
     args = parser.parse_args()
     
     if args.register:
-        register_with_ha()
+        logger.info("Registering with Home Assistant...")
+        if register_with_ha():
+            logger.info("Successfully registered with Home Assistant")
+        else:
+            logger.error("Failed to register with Home Assistant")
         sys.exit(0)
         
     if args.status:

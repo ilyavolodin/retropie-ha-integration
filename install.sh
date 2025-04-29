@@ -177,11 +177,30 @@ echo "Installing systemd service..."
 sudo mv /tmp/retropie-ha.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable retropie-ha.service
-sudo systemctl start retropie-ha.service
+
+# Delete any existing configurations in Home Assistant
+echo "Cleaning up old Home Assistant configurations..."
+# Safely remove old discovery configurations to avoid duplicates
+if [ -n "$MQTT_USERNAME" ]; then
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/sensor/retropie_${DEVICE_NAME// /_}/cpu_temp/config" -n -r -d
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/sensor/retropie_${DEVICE_NAME// /_}/gpu_temp/config" -n -r -d
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/sensor/retropie_${DEVICE_NAME// /_}/game_status/config" -n -r -d
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/sensor/retropie_${DEVICE_NAME// /_}/memory_usage/config" -n -r -d
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/sensor/retropie_${DEVICE_NAME// /_}/cpu_load/config" -n -r -d
+else
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/sensor/retropie_${DEVICE_NAME// /_}/cpu_temp/config" -n -r -d
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/sensor/retropie_${DEVICE_NAME// /_}/gpu_temp/config" -n -r -d
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/sensor/retropie_${DEVICE_NAME// /_}/game_status/config" -n -r -d
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/sensor/retropie_${DEVICE_NAME// /_}/memory_usage/config" -n -r -d
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/sensor/retropie_${DEVICE_NAME// /_}/cpu_load/config" -n -r -d
+fi
 
 # Register with Home Assistant
 echo "Registering with Home Assistant..."
 python3 "$CONFIG_DIR/mqtt_client.py" --register
+
+# Start the service after registration
+sudo systemctl start retropie-ha.service
 
 # Verify installation
 echo "Verifying installation..."
@@ -205,3 +224,7 @@ echo "Home Assistant should auto-discover the sensors if MQTT integration is con
 echo ""
 echo "NOTE: A restart of EmulationStation is recommended:"
 echo "touch /tmp/es-restart && killall emulationstation"
+echo ""
+echo "TIP: If Home Assistant doesn't auto-discover the integration,"
+echo "you may need to restart Home Assistant or check that MQTT discovery"
+echo "is enabled in your Home Assistant configuration."
