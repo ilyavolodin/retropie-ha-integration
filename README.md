@@ -12,6 +12,8 @@ This project provides integration between RetroPie and Home Assistant, allowing 
 - Control RetroArch via network commands
 - Display messages directly on the RetroArch screen
 - Get RetroArch status information in real-time
+- Change EmulationStation UI mode (Full, Kid, Kiosk)
+- Track game collection statistics (total games, favorites, kid-friendly)
 - Display real-time information in Home Assistant
 - Trigger automations based on game events
 
@@ -29,6 +31,13 @@ This project provides integration between RetroPie and Home Assistant, allowing 
   - Displaying on-screen messages
   - Retrieving RetroArch status information
   - Automatic configuration of RetroArch network commands
+- EmulationStation UI Mode control:
+  - Change between Full, Kid, and Kiosk modes
+  - Automatic restart of EmulationStation when mode changes
+- Game collection scanning:
+  - Total games count
+  - Favorite games count
+  - Kid-friendly games identification
 - Proper availability reporting for all entities
 - CPU and temperature monitoring
 - Memory and CPU usage reporting
@@ -88,6 +97,8 @@ This integration uses:
 8. **Play duration tracking** - Game start times are recorded to calculate play duration
 9. **Text-to-speech service** - Converts text from MQTT commands to speech using pico2wave and aplay
 10. **RetroArch Network Control** - Direct integration with RetroArch's Network Control Interface for commands and status
+11. **EmulationStation UI Mode Control** - Ability to change between Full, Kid, and Kiosk modes
+12. **Game Collection Scanning** - Asynchronous scanning of all game systems for statistics
 
 ## Home Assistant Integration
 
@@ -101,6 +112,9 @@ The integration creates the following entities in Home Assistant:
   - Game start time and play duration
 - **Machine Status** - Shows whether the system is idle, playing a game, or shut down
 - **System Status** - Shows whether the integration service is running or not
+- **Total Games** - Shows the total number of games in your collection
+- **Favorite Games** - Shows the number of games marked as favorites
+- **Kid-Friendly Games** - Shows the number of games suitable for children
 - **CPU Temperature** - Shows the current CPU temperature
 - **Memory Usage** - Shows the current memory usage as a percentage
 - **CPU Load** - Shows the current CPU load
@@ -111,6 +125,8 @@ The integration also creates the following services in Home Assistant:
 - **RetroArch Message** - Display a message on the RetroArch screen
 - **RetroArch Command** - Send any command to RetroArch
 - **RetroArch Status** - Get current status information from RetroArch
+- **UI Mode** - Change EmulationStation's UI mode (Full, Kid, Kiosk)
+- **Scan Games** - Start a background scan of your game collection
 
 ## Using Text-to-Speech
 
@@ -205,6 +221,53 @@ Additionally, when a game is launched through RetroArch, the integration verifie
    - `VOLUME_UP` / `VOLUME_DOWN` - Adjust volume
    - `SAVE_STATE` / `LOAD_STATE` - Save or load state
    - See the RetroArch documentation for a complete list of available commands
+
+## Using EmulationStation UI Mode Control
+
+You can change EmulationStation's user interface mode between Full, Kid, and Kiosk modes:
+
+1. **Home Assistant Service Call**:
+   - Service: `mqtt.publish`
+   - Data:
+     ```yaml
+     topic: retropie/command/ui_mode
+     payload: '{"mode": "Kid"}'  # Valid values: "Full", "Kid", "Kiosk"
+     ```
+
+2. **Example Automation**:
+   ```yaml
+   automation:
+     - alias: "Switch to Kid Mode When Idle"
+       trigger:
+         - platform: state
+           entity_id: sensor.retropie_machine_status
+           to: "idle"
+           for: "00:30:00"  # After 30 minutes of idle time
+       action:
+         - service: mqtt.publish
+           data:
+             topic: retropie/command/ui_mode
+             payload: '{"mode": "Kid"}'
+   ```
+
+   This automation will switch to Kid mode after 30 minutes of idle time.
+
+## Game Collection Statistics
+
+The integration automatically scans your game collection and provides statistics as sensors:
+
+1. **Available Sensors**:
+   - `sensor.retropie_total_games`: Total number of games in your collection
+   - `sensor.retropie_favorites`: Number of games marked as favorites
+   - `sensor.retropie_kid_friendly`: Number of games suitable for children
+
+2. **Manual Scan Trigger**:
+   - Service: `mqtt.publish`
+   - Data:
+     ```yaml
+     topic: retropie/command/scan_games
+     payload: '{}'
+     ```
 
 ## Troubleshooting
 

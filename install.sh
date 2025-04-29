@@ -194,6 +194,11 @@ if [ -n "$MQTT_USERNAME" ]; then
     mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/device_automation/retropie_${DEVICE_NAME// /_}/retroarch_message/config" -n -r -d
     mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/device_automation/retropie_${DEVICE_NAME// /_}/retroarch_command/config" -n -r -d
     mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/device_automation/retropie_${DEVICE_NAME// /_}/retroarch_status/config" -n -r -d
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/device_automation/retropie_${DEVICE_NAME// /_}/ui_mode/config" -n -r -d
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/device_automation/retropie_${DEVICE_NAME// /_}/scan_games/config" -n -r -d
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/sensor/retropie_${DEVICE_NAME// /_}/total_games/config" -n -r -d
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/sensor/retropie_${DEVICE_NAME// /_}/favorites/config" -n -r -d
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/sensor/retropie_${DEVICE_NAME// /_}/kid_friendly/config" -n -r -d
 else
     mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/sensor/retropie_${DEVICE_NAME// /_}/cpu_temp/config" -n -r -d
     mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/sensor/retropie_${DEVICE_NAME// /_}/gpu_temp/config" -n -r -d
@@ -206,6 +211,11 @@ else
     mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/device_automation/retropie_${DEVICE_NAME// /_}/retroarch_message/config" -n -r -d
     mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/device_automation/retropie_${DEVICE_NAME// /_}/retroarch_command/config" -n -r -d
     mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/device_automation/retropie_${DEVICE_NAME// /_}/retroarch_status/config" -n -r -d
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/device_automation/retropie_${DEVICE_NAME// /_}/ui_mode/config" -n -r -d
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/device_automation/retropie_${DEVICE_NAME// /_}/scan_games/config" -n -r -d
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/sensor/retropie_${DEVICE_NAME// /_}/total_games/config" -n -r -d
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/sensor/retropie_${DEVICE_NAME// /_}/favorites/config" -n -r -d
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/sensor/retropie_${DEVICE_NAME// /_}/kid_friendly/config" -n -r -d
 fi
 
 # Test audio for text-to-speech
@@ -266,6 +276,13 @@ echo "5. RetroArch Network Control Interface integration"
 echo "   - Display messages on RetroArch screen"
 echo "   - Send commands to RetroArch"
 echo "   - Get RetroArch status information"
+echo "6. EmulationStation UI Mode control"
+echo "   - Switch between Full, Kid, and Kiosk modes"
+echo "   - Create automations to switch modes based on conditions"
+echo "7. Game Collection Statistics"
+echo "   - Track total number of games in your collection"
+echo "   - Count favorite games"
+echo "   - Identify kid-friendly games based on ratings"
 echo ""
 echo "You can send text-to-speech commands from Home Assistant by publishing to:"
 echo "  Topic: $MQTT_TOPIC_PREFIX/command/tts"
@@ -276,6 +293,14 @@ echo "RetroArch Network Control Interface commands can be sent via:"
 echo "  Message Display: $MQTT_TOPIC_PREFIX/command/retroarch/message"
 echo "  Status Request: $MQTT_TOPIC_PREFIX/command/retroarch/status"
 echo "  Any Command: $MQTT_TOPIC_PREFIX/command/retroarch"
+echo ""
+echo "EmulationStation UI Mode can be controlled via:"
+echo "  $MQTT_TOPIC_PREFIX/command/ui_mode"
+echo "  Payload: {\"mode\": \"Full\"} or {\"mode\": \"Kid\"} or {\"mode\": \"Kiosk\"}"
+echo ""
+echo "Game collection statistics can be updated via:"
+echo "  $MQTT_TOPIC_PREFIX/command/scan_games"
+echo "  (This happens automatically at startup, but can be triggered manually)"
 echo ""
 # Try to automatically enable RetroArch network commands
 echo "Setting up RetroArch Network Commands..."

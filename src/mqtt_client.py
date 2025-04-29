@@ -37,7 +37,14 @@ current_state = {
     'machine_status': 'idle',  # idle, playing, shutdown
     'current_game': None,
     'game_start_time': None,
-    'last_update': int(time.time())
+    'last_update': int(time.time()),
+    'game_collection': {
+        'total_games': 0,
+        'favorites': 0,
+        'kid_friendly': 0,
+        'last_scan': 0,
+        'systems': {}
+    }
 }
 
 def ensure_config_dir():
@@ -455,7 +462,9 @@ def on_connect(client, userdata, flags, rc):
         f"{topic_prefix}/command/tts",
         f"{topic_prefix}/command/retroarch/status",
         f"{topic_prefix}/command/retroarch/message",
-        f"{topic_prefix}/command/retroarch"
+        f"{topic_prefix}/command/retroarch",
+        f"{topic_prefix}/command/ui_mode",
+        f"{topic_prefix}/command/scan_games"
     ]
     
     for topic in command_topics:
@@ -486,6 +495,14 @@ def on_message(client, userdata, msg):
         # Handle general RetroArch command
         elif msg.topic == f"{topic_prefix}/command/retroarch":
             handle_retroarch_command_message(msg, topic_prefix)
+            
+        # Handle UI mode change
+        elif msg.topic == f"{topic_prefix}/command/ui_mode":
+            handle_ui_mode_command(msg, topic_prefix)
+            
+        # Handle game collection scan
+        elif msg.topic == f"{topic_prefix}/command/scan_games":
+            handle_scan_games_command(msg, topic_prefix)
     
     except Exception as e:
         logger.error(f"Error processing message: {e}")
@@ -668,6 +685,94 @@ def handle_retroarch_command_message(msg, topic_prefix):
         }
         publish_mqtt_message(ack_topic, json.dumps(ack_payload), retain=False)
 
+def handle_ui_mode_command(msg, topic_prefix):
+    """Handle EmulationStation UI mode change command"""
+    try:
+        # Parse the command
+        try:
+            command_obj = json.loads(msg.payload.decode())
+            mode = command_obj.get('mode', '')
+        except json.JSONDecodeError:
+            # Try to treat the payload as plain text
+            mode = msg.payload.decode().strip()
+        
+        if mode and mode in ['Full', 'Kid', 'Kiosk']:
+            # Change the UI mode
+            logger.info(f"Changing EmulationStation UI mode to: {mode}")
+            success = change_es_ui_mode(mode)
+            
+            # Send acknowledgment
+            ack_topic = f"{topic_prefix}/command/ui_mode/response"
+            if success:
+                ack_payload = {
+                    'timestamp': int(time.time()),
+                    'status': 'success',
+                    'mode': mode,
+                    'message': f'UI mode changed to {mode}. EmulationStation will restart.'
+                }
+            else:
+                ack_payload = {
+                    'timestamp': int(time.time()),
+                    'status': 'error',
+                    'mode': mode,
+                    'message': f'Failed to change UI mode to {mode}. Check logs for details.'
+                }
+            publish_mqtt_message(ack_topic, json.dumps(ack_payload), retain=False)
+        else:
+            logger.error(f"Invalid UI mode: {mode}. Must be one of: Full, Kid, Kiosk")
+            
+            # Send error response
+            ack_topic = f"{topic_prefix}/command/ui_mode/response"
+            ack_payload = {
+                'timestamp': int(time.time()),
+                'status': 'error',
+                'message': f'Invalid UI mode: {mode}. Must be one of: Full, Kid, Kiosk'
+            }
+            publish_mqtt_message(ack_topic, json.dumps(ack_payload), retain=False)
+    except Exception as e:
+        logger.error(f"Error handling UI mode command: {e}")
+        # Send error response
+        ack_topic = f"{topic_prefix}/command/ui_mode/response"
+        ack_payload = {
+            'timestamp': int(time.time()),
+            'status': 'error',
+            'message': f'Error: {str(e)}'
+        }
+        publish_mqtt_message(ack_topic, json.dumps(ack_payload), retain=False)
+
+def handle_scan_games_command(msg, topic_prefix):
+    """Handle game collection scan command"""
+    try:
+        # Start the scan
+        logger.info("Received command to scan game collection")
+        success = scan_game_collection()
+        
+        # Send acknowledgment
+        ack_topic = f"{topic_prefix}/command/scan_games/response"
+        if success:
+            ack_payload = {
+                'timestamp': int(time.time()),
+                'status': 'success',
+                'message': 'Game collection scan started in the background'
+            }
+        else:
+            ack_payload = {
+                'timestamp': int(time.time()),
+                'status': 'error',
+                'message': 'Failed to start game collection scan. Check logs for details.'
+            }
+        publish_mqtt_message(ack_topic, json.dumps(ack_payload), retain=False)
+    except Exception as e:
+        logger.error(f"Error handling scan games command: {e}")
+        # Send error response
+        ack_topic = f"{topic_prefix}/command/scan_games/response"
+        ack_payload = {
+            'timestamp': int(time.time()),
+            'status': 'error',
+            'message': f'Error: {str(e)}'
+        }
+        publish_mqtt_message(ack_topic, json.dumps(ack_payload), retain=False)
+
 def execute_tts(text):
     """Execute text-to-speech using system speakers"""
     try:
@@ -686,6 +791,236 @@ def execute_tts(text):
         return True
     except Exception as e:
         logger.error(f"Error executing TTS: {e}")
+        return False
+
+def scan_game_collection():
+    """Scan all gamelist.xml files to collect game statistics"""
+    try:
+        # Scan in a separate thread to avoid blocking
+        threading.Thread(target=_scan_game_collection_thread, daemon=True).start()
+        return True
+    except Exception as e:
+        logger.error(f"Error starting game collection scan: {e}")
+        return False
+
+def _scan_game_collection_thread():
+    """Background thread to scan game collection"""
+    global current_state
+    
+    try:
+        logger.info("Starting game collection scan...")
+        start_time = time.time()
+        
+        # Stats to collect
+        total_games = 0
+        favorites = 0
+        kid_friendly = 0
+        systems_data = {}
+        
+        # Rating threshold for kid-friendly games (typically 0.0-1.0 scale)
+        kid_rating_threshold = 0.5  # Consider games with rating <= 0.5 as kid-friendly
+        
+        # Scan each system directory in the ROMS_DIR
+        for system_dir in os.listdir(ROMS_DIR):
+            system_path = os.path.join(ROMS_DIR, system_dir)
+            
+            # Skip if not a directory
+            if not os.path.isdir(system_path):
+                continue
+            
+            # Look for gamelist.xml
+            gamelist_path = os.path.join(system_path, 'gamelist.xml')
+            if not os.path.exists(gamelist_path):
+                continue
+            
+            # Parse the gamelist.xml
+            try:
+                tree = ET.parse(gamelist_path)
+                root = tree.getroot()
+                
+                # Initialize system stats
+                system_games = 0
+                system_favorites = 0
+                system_kid_friendly = 0
+                
+                # Process each game
+                for game in root.findall('game'):
+                    system_games += 1
+                    
+                    # Check if favorite
+                    favorite_elem = game.find('favorite')
+                    if favorite_elem is not None and favorite_elem.text == 'true':
+                        system_favorites += 1
+                        favorites += 1
+                    
+                    # Check rating for kid-friendly
+                    rating_elem = game.find('rating')
+                    if rating_elem is not None and rating_elem.text:
+                        try:
+                            rating = float(rating_elem.text)
+                            if rating <= kid_rating_threshold:
+                                system_kid_friendly += 1
+                                kid_friendly += 1
+                        except ValueError:
+                            pass
+                
+                # Update total count
+                total_games += system_games
+                
+                # Store system data
+                systems_data[system_dir] = {
+                    'games': system_games,
+                    'favorites': system_favorites,
+                    'kid_friendly': system_kid_friendly
+                }
+                
+                logger.info(f"Scanned system '{system_dir}': {system_games} games, "
+                           f"{system_favorites} favorites, {system_kid_friendly} kid-friendly")
+            
+            except Exception as e:
+                logger.error(f"Error parsing gamelist for system '{system_dir}': {e}")
+        
+        # Update the global state
+        current_state['game_collection'] = {
+            'total_games': total_games,
+            'favorites': favorites,
+            'kid_friendly': kid_friendly,
+            'last_scan': int(time.time()),
+            'systems': systems_data
+        }
+        
+        # Save state to file
+        save_state()
+        
+        # Publish game collection stats
+        publish_game_collection_stats()
+        
+        elapsed_time = time.time() - start_time
+        logger.info(f"Game collection scan completed in {elapsed_time:.2f} seconds: "
+                   f"{total_games} total games, {favorites} favorites, {kid_friendly} kid-friendly")
+        
+    except Exception as e:
+        logger.error(f"Error in game collection scan thread: {e}")
+
+def publish_game_collection_stats():
+    """Publish game collection statistics to MQTT"""
+    try:
+        config = get_config()
+        topic_prefix = config.get('mqtt_topic_prefix', 'retropie')
+        
+        # Prepare payload
+        payload = {
+            'timestamp': int(time.time()),
+            'total_games': current_state['game_collection']['total_games'],
+            'favorites': current_state['game_collection']['favorites'],
+            'kid_friendly': current_state['game_collection']['kid_friendly'],
+            'last_scan': current_state['game_collection']['last_scan'],
+            'systems': len(current_state['game_collection']['systems'])
+        }
+        
+        # Publish to the game_collection topic
+        topic = f"{topic_prefix}/game_collection"
+        publish_mqtt_message(topic, json.dumps(payload), retain=True)
+        logger.info("Published game collection statistics")
+        return True
+    except Exception as e:
+        logger.error(f"Error publishing game collection stats: {e}")
+        return False
+
+def change_es_ui_mode(mode):
+    """Change EmulationStation's UI mode (Full, Kid, Kiosk)
+    
+    Args:
+        mode (str): The UI mode to set. Must be one of: 'Full', 'Kid', 'Kiosk'
+        
+    Returns:
+        bool: True if the mode was changed successfully, False otherwise
+    """
+    try:
+        if mode not in ['Full', 'Kid', 'Kiosk']:
+            logger.error(f"Invalid UI mode: {mode}. Must be one of: Full, Kid, Kiosk")
+            return False
+        
+        # Path to EmulationStation settings file
+        es_settings_paths = [
+            os.path.expanduser('~/.emulationstation/es_settings.cfg'),
+            '/opt/retropie/configs/all/emulationstation/es_settings.cfg'
+        ]
+        
+        es_settings_path = None
+        for path in es_settings_paths:
+            if os.path.exists(path):
+                es_settings_path = path
+                break
+        
+        if not es_settings_path:
+            logger.error("Could not find EmulationStation settings file")
+            return False
+        
+        logger.info(f"Found EmulationStation settings at: {es_settings_path}")
+        
+        # Parse the XML settings file
+        try:
+            tree = ET.parse(es_settings_path)
+            root = tree.getroot()
+            
+            # Check if UIMode setting exists
+            ui_mode_elem = None
+            for elem in root.findall('string'):
+                if elem.get('name') == 'UIMode':
+                    ui_mode_elem = elem
+                    break
+            
+            if ui_mode_elem is not None:
+                # Update existing setting
+                current_mode = ui_mode_elem.get('value')
+                if current_mode == mode:
+                    logger.info(f"UI mode is already set to {mode}")
+                    return True
+                
+                ui_mode_elem.set('value', mode)
+                logger.info(f"Changed UI mode from {current_mode} to {mode}")
+            else:
+                # Create new UIMode setting
+                ui_mode_elem = ET.SubElement(root, 'string')
+                ui_mode_elem.set('name', 'UIMode')
+                ui_mode_elem.set('value', mode)
+                logger.info(f"Created new UI mode setting: {mode}")
+            
+            # Write the updated settings back to the file
+            tree.write(es_settings_path)
+            
+            # Restart EmulationStation if it's running
+            restart_emulationstation()
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error updating EmulationStation settings: {e}")
+            return False
+            
+    except Exception as e:
+        logger.error(f"Error changing EmulationStation UI mode: {e}")
+        return False
+
+def restart_emulationstation():
+    """Restart EmulationStation by touching /tmp/es-restart and killing the process"""
+    try:
+        # Create the restart trigger file
+        with open('/tmp/es-restart', 'w') as f:
+            f.write('')
+        
+        # Kill EmulationStation to trigger restart
+        try:
+            subprocess.run(['killall', 'emulationstation'], check=False)
+            logger.info("Sent restart signal to EmulationStation")
+            return True
+        except Exception as e:
+            logger.error(f"Error killing EmulationStation: {e}")
+            return False
+            
+    except Exception as e:
+        logger.error(f"Error creating restart trigger: {e}")
         return False
 
 def verify_retroarch_network_commands():
@@ -1092,6 +1427,78 @@ def register_with_ha():
         )
         logger.info(f"Published CPU load sensor config")
         
+        # Register total games sensor
+        total_games_config = {
+            "device": device_info,
+            "name": f"RetroPie {device_name} Total Games",
+            "unique_id": f"retropie_{safe_device_name}_total_games",
+            "object_id": f"retropie_{safe_device_name}_total_games",
+            "state_topic": f"{topic_prefix}/game_collection",
+            "value_template": "{{ value_json.total_games }}",
+            "icon": "mdi:gamepad-variant-outline",
+            "state_class": "measurement",
+            "availability": availability,
+            "availability_mode": "all",
+            "enabled_by_default": True,
+            "origin": origin_info
+        }
+        
+        client.publish(
+            f"homeassistant/sensor/retropie_{safe_device_name}/total_games/config",
+            json.dumps(total_games_config),
+            qos=1,
+            retain=True
+        )
+        logger.info(f"Published total games sensor config")
+        
+        # Register favorites sensor
+        favorites_config = {
+            "device": device_info,
+            "name": f"RetroPie {device_name} Favorite Games",
+            "unique_id": f"retropie_{safe_device_name}_favorites",
+            "object_id": f"retropie_{safe_device_name}_favorites",
+            "state_topic": f"{topic_prefix}/game_collection",
+            "value_template": "{{ value_json.favorites }}",
+            "icon": "mdi:star",
+            "state_class": "measurement",
+            "availability": availability,
+            "availability_mode": "all",
+            "enabled_by_default": True,
+            "origin": origin_info
+        }
+        
+        client.publish(
+            f"homeassistant/sensor/retropie_{safe_device_name}/favorites/config",
+            json.dumps(favorites_config),
+            qos=1,
+            retain=True
+        )
+        logger.info(f"Published favorites sensor config")
+        
+        # Register kid-friendly games sensor
+        kid_friendly_config = {
+            "device": device_info,
+            "name": f"RetroPie {device_name} Kid-Friendly Games",
+            "unique_id": f"retropie_{safe_device_name}_kid_friendly",
+            "object_id": f"retropie_{safe_device_name}_kid_friendly",
+            "state_topic": f"{topic_prefix}/game_collection",
+            "value_template": "{{ value_json.kid_friendly }}",
+            "icon": "mdi:human-male-child",
+            "state_class": "measurement",
+            "availability": availability,
+            "availability_mode": "all",
+            "enabled_by_default": True,
+            "origin": origin_info
+        }
+        
+        client.publish(
+            f"homeassistant/sensor/retropie_{safe_device_name}/kid_friendly/config",
+            json.dumps(kid_friendly_config),
+            qos=1,
+            retain=True
+        )
+        logger.info(f"Published kid-friendly games sensor config")
+        
         client.publish(
             f"homeassistant/device_automation/retropie_{safe_device_name}/tts/config",
             json.dumps(tts_service_config),
@@ -1178,6 +1585,58 @@ def register_with_ha():
         )
         logger.info(f"Published RetroArch status service config")
         
+        # Register UI mode service
+        ui_mode_config = {
+            "automation_type": "trigger",
+            "type": "action",
+            "subtype": "ui_mode",
+            "device": device_info,
+            "topic": f"{topic_prefix}/command/ui_mode",
+            "availability": availability,
+            "payload": "{{payload}}",
+            "payload_template": "{{payload_template}}",
+            "value_template": "{{value}}",
+            "name": f"RetroPie {device_name} UI Mode",
+            "unique_id": f"retropie_{safe_device_name}_ui_mode",
+            "icon": "mdi:view-dashboard",
+            "enabled_by_default": True,
+            "origin": origin_info
+        }
+        
+        client.publish(
+            f"homeassistant/device_automation/retropie_{safe_device_name}/ui_mode/config",
+            json.dumps(ui_mode_config),
+            qos=1,
+            retain=True
+        )
+        logger.info(f"Published UI mode service config")
+        
+        # Register scan games service
+        scan_games_config = {
+            "automation_type": "trigger",
+            "type": "action",
+            "subtype": "scan_games",
+            "device": device_info,
+            "topic": f"{topic_prefix}/command/scan_games",
+            "availability": availability,
+            "payload": "{{payload}}",
+            "payload_template": "{{payload_template}}",
+            "value_template": "{{value}}",
+            "name": f"RetroPie {device_name} Scan Games",
+            "unique_id": f"retropie_{safe_device_name}_scan_games",
+            "icon": "mdi:database-search",
+            "enabled_by_default": True,
+            "origin": origin_info
+        }
+        
+        client.publish(
+            f"homeassistant/device_automation/retropie_{safe_device_name}/scan_games/config",
+            json.dumps(scan_games_config),
+            qos=1,
+            retain=True
+        )
+        logger.info(f"Published scan games service config")
+        
         # Also publish an initial status message to make the sensors available immediately
         status_payload = {
             'timestamp': int(time.time()),
@@ -1240,6 +1699,10 @@ if __name__ == '__main__':
         publish_game_event('system-start')
         
         # Start MQTT listener
+        # Start a game collection scan in the background
+        logger.info("Starting initial game collection scan...")
+        scan_game_collection()
+        
         mqtt_client = start_mqtt_listener()
         if mqtt_client:
             try:
