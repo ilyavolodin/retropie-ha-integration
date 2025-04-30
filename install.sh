@@ -90,7 +90,11 @@ sudo mkdir -p "$RC_SCRIPTS_DIR/runcommand-onstart" "$RC_SCRIPTS_DIR/runcommand-o
 
 # Install dependencies
 echo "Installing dependencies..."
-sudo apt-get update && sudo apt-get install -y python3-paho-mqtt mosquitto-clients libttspico-utils alsa-utils
+sudo apt-get update && sudo apt-get install -y python3-paho-mqtt mosquitto-clients libttspico-utils alsa-utils python3-pip
+
+# Install Python dependencies
+echo "Installing Python packages..."
+pip3 install watchdog
 
 # Copy Python scripts
 echo "Copying Python scripts..."

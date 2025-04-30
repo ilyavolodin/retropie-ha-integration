@@ -13,6 +13,15 @@ import xml.etree.ElementTree as ET
 import base64
 from pathlib import Path
 import threading
+import atexit
+try:
+    from watchdog.observers import Observer
+    from watchdog.events import FileSystemEventHandler
+    from watchdog.events import PatternMatchingEventHandler
+    watchdog_available = True
+except ImportError:
+    watchdog_available = False
+    logger.warning("Watchdog library not available. File monitoring disabled. Install with: pip install watchdog")
 
 # Set up logging
 logging.basicConfig(
@@ -1007,6 +1016,99 @@ def scan_game_collection():
         logger.error(f"Error starting game collection scan: {e}")
         return False
 
+# Global observer for file monitoring
+file_observer = None
+scan_debounce_timer = None
+DEBOUNCE_SECONDS = 5  # Debounce file changes to prevent multiple rapid scans
+
+class GamelistChangeHandler(PatternMatchingEventHandler):
+    """Event handler for gamelist.xml file changes"""
+    
+    def __init__(self):
+        super(GamelistChangeHandler, self).__init__(
+            patterns=["*gamelist.xml"],
+            ignore_directories=True,
+            case_sensitive=False
+        )
+    
+    def on_modified(self, event):
+        """Called when a file is modified"""
+        self._handle_gamelist_change(event)
+    
+    def on_created(self, event):
+        """Called when a file is created"""
+        self._handle_gamelist_change(event)
+    
+    def _handle_gamelist_change(self, event):
+        """Handle game list file changes with debounce"""
+        global scan_debounce_timer
+        
+        # Log the event
+        logger.info(f"Detected change in gamelist: {event.src_path}")
+        
+        # Cancel existing timer if it's running
+        if scan_debounce_timer is not None:
+            scan_debounce_timer.cancel()
+        
+        # Set a new timer to trigger scan after delay
+        scan_debounce_timer = threading.Timer(DEBOUNCE_SECONDS, self._trigger_scan)
+        scan_debounce_timer.daemon = True
+        scan_debounce_timer.start()
+    
+    def _trigger_scan(self):
+        """Trigger a game collection scan after debounce period"""
+        logger.info("Triggering game collection scan due to gamelist.xml changes")
+        scan_game_collection()
+
+def start_file_monitoring():
+    """Start monitoring gamelist.xml files for changes"""
+    global file_observer
+    
+    if not watchdog_available:
+        logger.warning("Watchdog library not available. Skipping file monitoring setup.")
+        return False
+    
+    try:
+        # Create event handler and observer
+        event_handler = GamelistChangeHandler()
+        file_observer = Observer()
+        file_observer.daemon = True  # Make sure observer thread exits when main thread exits
+        
+        # Schedule monitoring for each system directory
+        if os.path.exists(ROMS_DIR):
+            # Schedule the main ROMS_DIR
+            file_observer.schedule(event_handler, ROMS_DIR, recursive=False)
+            
+            # Schedule each system directory
+            for system_dir in os.listdir(ROMS_DIR):
+                system_path = os.path.join(ROMS_DIR, system_dir)
+                if os.path.isdir(system_path):
+                    file_observer.schedule(event_handler, system_path, recursive=False)
+        
+        # Start the observer
+        file_observer.start()
+        logger.info(f"Started file monitoring for gamelist.xml files in {ROMS_DIR}")
+        
+        # Register a cleanup function to stop the observer
+        atexit.register(stop_file_monitoring)
+        
+        return True
+    except Exception as e:
+        logger.error(f"Error starting file monitoring: {e}")
+        return False
+
+def stop_file_monitoring():
+    """Stop monitoring gamelist.xml files"""
+    global file_observer
+    
+    if file_observer and file_observer.is_alive():
+        logger.info("Stopping file monitoring")
+        file_observer.stop()
+        file_observer.join(timeout=3)  # Wait up to 3 seconds for the thread to finish
+        file_observer = None
+        return True
+    return False
+
 def _scan_game_collection_thread():
     """Background thread to scan game collection"""
     global current_state
@@ -1953,6 +2055,9 @@ if __name__ == '__main__':
         logger.info("Starting initial game collection scan...")
         scan_game_collection()
         
+        # Start monitoring gamelist.xml files for changes
+        start_file_monitoring()
+        
         mqtt_client = start_mqtt_listener()
         if mqtt_client:
             try:
@@ -1964,6 +2069,9 @@ if __name__ == '__main__':
             except KeyboardInterrupt:
                 logger.info("Stopping MQTT listener...")
                 mqtt_client.loop_stop()
+                # Stop file monitoring
+                stop_file_monitoring()
+                
                 # Send system-shutdown event before exiting
                 publish_game_event('quit')
         sys.exit(0)

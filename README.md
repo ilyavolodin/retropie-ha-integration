@@ -38,6 +38,7 @@ This project provides integration between RetroPie and Home Assistant, allowing 
   - Total games count
   - Favorite games count
   - Kid-friendly games identification
+  - Automatic rescanning when gamelist.xml files change
 - Proper availability reporting for all entities
 - CPU and temperature monitoring
 - Memory and CPU usage reporting
@@ -261,7 +262,12 @@ The integration automatically scans your game collection and provides statistics
    - `sensor.retropie_favorites`: Number of games marked as favorites
    - `sensor.retropie_kid_friendly`: Number of games suitable for children
 
-2. **Manual Scan Trigger**:
+2. **Automatic Updates**:
+   - The integration automatically monitors all gamelist.xml files
+   - When you add, remove, or mark games as favorites, stats are updated
+   - There's a 5-second debounce to avoid frequent updates during bulk changes
+
+3. **Manual Scan Trigger**:
    - Service: `mqtt.publish`
    - Data:
      ```yaml
