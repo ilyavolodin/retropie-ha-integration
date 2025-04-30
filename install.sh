@@ -248,16 +248,21 @@ HOME_DIR=$(eval echo ~$CURRENT_USER)
 cat > /tmp/retropie-ha.service << EOF
 [Unit]
 Description=RetroPie Home Assistant Integration
-After=network.target
+After=network-online.target
 Wants=network-online.target
+# Make sure to wait for network to be fully ready
+Requires=network-online.target
 
 [Service]
 Type=simple
 User=$CURRENT_USER
 WorkingDirectory=$HOME_DIR
+# Add a sleep to ensure network is fully ready
+ExecStartPre=/bin/sleep 10
 ExecStart=/usr/bin/python3 $CONFIG_DIR/status_reporter.py
-Restart=on-failure
-RestartSec=5
+# More robust restart settings
+Restart=always
+RestartSec=30
 StandardOutput=journal
 StandardError=journal
 

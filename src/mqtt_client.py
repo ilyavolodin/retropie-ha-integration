@@ -230,8 +230,8 @@ def get_game_metadata(system, rom_path):
         logger.error(f"Error getting game metadata: {e}")
         return {}
 
-def publish_mqtt_message(topic, message, retain=False):
-    """Publish a message to MQTT broker"""
+def publish_mqtt_message(topic, message, retain=False, max_retries=5):
+    """Publish a message to MQTT broker with retry logic"""
     config = get_config()
     
     if not config.get('mqtt_host'):
@@ -243,15 +243,31 @@ def publish_mqtt_message(topic, message, retain=False):
     if config.get('mqtt_username') and config.get('mqtt_password'):
         client.username_pw_set(config['mqtt_username'], config['mqtt_password'])
     
-    try:
-        client.connect(config['mqtt_host'], int(config.get('mqtt_port', 1883)), 60)
-        client.publish(topic, message, qos=1, retain=retain)
-        client.disconnect()
-        logger.info(f"Published to {topic}: {message[:100]}{'...' if len(message) > 100 else ''}")
-        return True
-    except Exception as e:
-        logger.error(f"Error publishing to MQTT: {e}")
-        return False
+    # Add retry logic with exponential backoff
+    retries = 0
+    max_wait = 60  # Maximum wait time in seconds
+    while retries < max_retries:
+        try:
+            # Set a shorter connection timeout for quicker detection of network issues
+            client.connect(config['mqtt_host'], int(config.get('mqtt_port', 1883)), 15)
+            client.publish(topic, message, qos=1, retain=retain)
+            client.disconnect()
+            logger.info(f"Published to {topic}: {message[:100]}{'...' if len(message) > 100 else ''}")
+            return True
+        except Exception as e:
+            retries += 1
+            # Only log as error on final retry, otherwise log as warning
+            if retries >= max_retries:
+                logger.error(f"Error publishing to MQTT after {max_retries} attempts: {e}")
+                return False
+            else:
+                # Calculate wait time with exponential backoff (2^retry seconds)
+                wait_time = min(2 ** retries, max_wait)
+                logger.warning(f"Error publishing to MQTT (attempt {retries}/{max_retries}): {e}. Retrying in {wait_time} seconds.")
+                time.sleep(wait_time)
+                
+    # This should never be reached due to the return in the final retry
+    return False
 
 def publish_game_event(event_type, args=None):
     """Publish an EmulationStation game event to MQTT"""
@@ -1460,8 +1476,8 @@ def get_retroarch_status():
         logger.error(f"Error getting RetroArch status: {e}")
         return None
 
-def start_mqtt_listener():
-    """Start a background MQTT listener for commands"""
+def start_mqtt_listener(max_retries=10):
+    """Start a background MQTT listener for commands with retry logic"""
     config = get_config()
     
     if not config.get('mqtt_host'):
@@ -1475,14 +1491,39 @@ def start_mqtt_listener():
     if config.get('mqtt_username') and config.get('mqtt_password'):
         client.username_pw_set(config['mqtt_username'], config['mqtt_password'])
     
-    try:
-        client.connect(config['mqtt_host'], int(config.get('mqtt_port', 1883)), 60)
-        client.loop_start()
-        logger.info("MQTT listener started")
-        return client
-    except Exception as e:
-        logger.error(f"Error starting MQTT listener: {e}")
-        return None
+    # Add retry logic with exponential backoff
+    retries = 0
+    max_wait = 60  # Maximum wait time in seconds
+    while retries < max_retries:
+        try:
+            # Set a shorter connection timeout for quicker failure detection
+            client.connect(config['mqtt_host'], int(config.get('mqtt_port', 1883)), 15)
+            client.loop_start()
+            logger.info("MQTT listener started successfully")
+            
+            # Add will message so Home Assistant knows when we're offline
+            topic_prefix = config.get('mqtt_topic_prefix', 'retropie')
+            will_topic = f"{topic_prefix}/availability"
+            client.will_set(will_topic, "offline", qos=1, retain=True)
+            
+            # Immediately publish online status
+            client.publish(will_topic, "online", qos=1, retain=True)
+            
+            return client
+        except Exception as e:
+            retries += 1
+            # Calculate wait time with exponential backoff (2^retry seconds)
+            wait_time = min(2 ** retries, max_wait)
+            
+            if retries >= max_retries:
+                logger.error(f"Failed to start MQTT listener after {max_retries} attempts: {e}")
+                return None
+            else:
+                logger.warning(f"Error starting MQTT listener (attempt {retries}/{max_retries}): {e}. Retrying in {wait_time} seconds...")
+                time.sleep(wait_time)
+    
+    # Should never reach here due to the return in the max retries case
+    return None
 
 def register_with_ha():
     """Register device with Home Assistant via MQTT discovery"""
