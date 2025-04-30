@@ -14,6 +14,7 @@ import base64
 from pathlib import Path
 import threading
 import atexit
+# Try to import watchdog, but don't crash if it's not available
 try:
     from watchdog.observers import Observer
     from watchdog.events import FileSystemEventHandler
@@ -21,7 +22,8 @@ try:
     watchdog_available = True
 except ImportError:
     watchdog_available = False
-    logger.warning("Watchdog library not available. File monitoring disabled. Install with: pip install watchdog")
+    # Don't log here, since logger isn't initialized yet
+    # We'll log this later
 
 # Set up logging
 logging.basicConfig(
@@ -1065,7 +1067,10 @@ def start_file_monitoring():
     global file_observer
     
     if not watchdog_available:
-        logger.warning("Watchdog library not available. Skipping file monitoring setup.")
+        logger.warning("Watchdog library not available. File monitoring disabled.")
+        logger.warning("To enable file monitoring, install watchdog using:")
+        logger.warning("  sudo apt-get install python3-watchdog")
+        logger.warning("  or pip3 install watchdog")
         return False
     
     try:
@@ -1100,6 +1105,10 @@ def start_file_monitoring():
 def stop_file_monitoring():
     """Stop monitoring gamelist.xml files"""
     global file_observer
+    
+    # If watchdog is not available, there's nothing to stop
+    if not watchdog_available:
+        return False
     
     if file_observer and file_observer.is_alive():
         logger.info("Stopping file monitoring")

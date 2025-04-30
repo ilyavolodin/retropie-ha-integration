@@ -94,7 +94,28 @@ sudo apt-get update && sudo apt-get install -y python3-paho-mqtt mosquitto-clien
 
 # Install Python dependencies
 echo "Installing Python packages..."
-pip3 install watchdog
+# Try to install python3-watchdog via apt first (preferred method)
+if sudo apt-get install -y python3-watchdog; then
+    echo "Successfully installed watchdog via apt"
+else
+    echo "Could not install watchdog via apt, trying pip..."
+    # Try pip with --break-system-packages flag (for newer Debian/Ubuntu systems)
+    if pip3 install watchdog --break-system-packages; then
+        echo "Successfully installed watchdog via pip with --break-system-packages"
+    else
+        echo "Could not install watchdog via pip with --break-system-packages, trying without the flag..."
+        # Try standard pip install as a last resort
+        if pip3 install watchdog; then
+            echo "Successfully installed watchdog via pip"
+        else
+            echo "WARNING: Failed to install watchdog. File monitoring will be disabled."
+            echo "To enable file monitoring, you can manually install watchdog using one of these methods:"
+            echo "  - sudo apt-get install python3-watchdog"
+            echo "  - pip3 install watchdog --break-system-packages"
+            echo "  - Create a virtual environment and install there"
+        fi
+    fi
+fi
 
 # Copy Python scripts
 echo "Copying Python scripts..."
