@@ -190,12 +190,24 @@ if [ -n "$MQTT_USERNAME" ]; then
     mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/sensor/retropie_${DEVICE_NAME// /_}/cpu_load/config" -n -r -d
     mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/sensor/retropie_${DEVICE_NAME// /_}/machine_status/config" -n -r -d
     mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/sensor/retropie_${DEVICE_NAME// /_}/play_duration/config" -n -r -d
+    # Clear old device automation entities
     mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/device_automation/retropie_${DEVICE_NAME// /_}/tts/config" -n -r -d
     mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/device_automation/retropie_${DEVICE_NAME// /_}/retroarch_message/config" -n -r -d
     mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/device_automation/retropie_${DEVICE_NAME// /_}/retroarch_command/config" -n -r -d
     mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/device_automation/retropie_${DEVICE_NAME// /_}/retroarch_status/config" -n -r -d
     mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/device_automation/retropie_${DEVICE_NAME// /_}/ui_mode/config" -n -r -d
     mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/device_automation/retropie_${DEVICE_NAME// /_}/scan_games/config" -n -r -d
+    
+    # Clear new entities
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/text/retropie_${DEVICE_NAME// /_}/tts_text/config" -n -r -d
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/button/retropie_${DEVICE_NAME// /_}/tts_speak/config" -n -r -d
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/text/retropie_${DEVICE_NAME// /_}/retroarch_message_text/config" -n -r -d
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/button/retropie_${DEVICE_NAME// /_}/retroarch_display_message/config" -n -r -d
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/text/retropie_${DEVICE_NAME// /_}/retroarch_command_text/config" -n -r -d
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/button/retropie_${DEVICE_NAME// /_}/retroarch_execute_command/config" -n -r -d
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/button/retropie_${DEVICE_NAME// /_}/retroarch_get_status/config" -n -r -d
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/select/retropie_${DEVICE_NAME// /_}/ui_mode/config" -n -r -d
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/button/retropie_${DEVICE_NAME// /_}/scan_games/config" -n -r -d
     mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/sensor/retropie_${DEVICE_NAME// /_}/total_games/config" -n -r -d
     mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/sensor/retropie_${DEVICE_NAME// /_}/favorites/config" -n -r -d
     mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/sensor/retropie_${DEVICE_NAME// /_}/kid_friendly/config" -n -r -d
@@ -213,6 +225,17 @@ else
     mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/device_automation/retropie_${DEVICE_NAME// /_}/retroarch_status/config" -n -r -d
     mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/device_automation/retropie_${DEVICE_NAME// /_}/ui_mode/config" -n -r -d
     mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/device_automation/retropie_${DEVICE_NAME// /_}/scan_games/config" -n -r -d
+    
+    # Clear new entities
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/text/retropie_${DEVICE_NAME// /_}/tts_text/config" -n -r -d
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/button/retropie_${DEVICE_NAME// /_}/tts_speak/config" -n -r -d
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/text/retropie_${DEVICE_NAME// /_}/retroarch_message_text/config" -n -r -d
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/button/retropie_${DEVICE_NAME// /_}/retroarch_display_message/config" -n -r -d
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/text/retropie_${DEVICE_NAME// /_}/retroarch_command_text/config" -n -r -d
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/button/retropie_${DEVICE_NAME// /_}/retroarch_execute_command/config" -n -r -d
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/button/retropie_${DEVICE_NAME// /_}/retroarch_get_status/config" -n -r -d
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/select/retropie_${DEVICE_NAME// /_}/ui_mode/config" -n -r -d
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/button/retropie_${DEVICE_NAME// /_}/scan_games/config" -n -r -d
     mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/sensor/retropie_${DEVICE_NAME// /_}/total_games/config" -n -r -d
     mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/sensor/retropie_${DEVICE_NAME// /_}/favorites/config" -n -r -d
     mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/sensor/retropie_${DEVICE_NAME// /_}/kid_friendly/config" -n -r -d

@@ -459,11 +459,21 @@ def on_connect(client, userdata, flags, rc):
     
     # Subscribe to all command topics
     command_topics = [
+        # TTS
         f"{topic_prefix}/command/tts",
-        f"{topic_prefix}/command/retroarch/status",
+        f"{topic_prefix}/tts_text/set",
+        
+        # RetroArch
+        f"{topic_prefix}/command/retroarch/status", 
         f"{topic_prefix}/command/retroarch/message",
         f"{topic_prefix}/command/retroarch",
+        f"{topic_prefix}/retroarch_message_text/set",
+        f"{topic_prefix}/retroarch_command_text/set",
+        
+        # UI Mode
         f"{topic_prefix}/command/ui_mode",
+        
+        # Scan Games
         f"{topic_prefix}/command/scan_games"
     ]
     
@@ -480,21 +490,33 @@ def on_message(client, userdata, msg):
         config = get_config()
         topic_prefix = config.get('mqtt_topic_prefix', 'retropie')
         
-        # Handle TTS command
+        # Handle TTS related
         if msg.topic == f"{topic_prefix}/command/tts":
             handle_tts_command(msg, topic_prefix)
+        elif msg.topic == f"{topic_prefix}/tts_text/set":
+            handle_tts_command(msg, topic_prefix)
         
-        # Handle RetroArch status request
+        # Handle RetroArch related
         elif msg.topic == f"{topic_prefix}/command/retroarch/status":
             handle_retroarch_status_command(msg, topic_prefix)
-        
-        # Handle RetroArch message display
         elif msg.topic == f"{topic_prefix}/command/retroarch/message":
             handle_retroarch_message_command(msg, topic_prefix)
-        
-        # Handle general RetroArch command
+        elif msg.topic == f"{topic_prefix}/retroarch_message_text/set":
+            # Store the message text for later use
+            text = msg.payload.decode().strip()
+            if hasattr(handle_retroarch_message_command, 'current_text'):
+                handle_retroarch_message_command.current_text = text
+            # Update the state topic
+            publish_mqtt_message(f"{topic_prefix}/retroarch_message_text/state", text, retain=True)
         elif msg.topic == f"{topic_prefix}/command/retroarch":
             handle_retroarch_command_message(msg, topic_prefix)
+        elif msg.topic == f"{topic_prefix}/retroarch_command_text/set":
+            # Store the command text for later use
+            text = msg.payload.decode().strip()
+            if hasattr(handle_retroarch_command_message, 'current_text'):
+                handle_retroarch_command_message.current_text = text
+            # Update the state topic
+            publish_mqtt_message(f"{topic_prefix}/retroarch_command_text/state", text, retain=True)
             
         # Handle UI mode change
         elif msg.topic == f"{topic_prefix}/command/ui_mode":
@@ -510,62 +532,129 @@ def on_message(client, userdata, msg):
 def handle_tts_command(msg, topic_prefix):
     """Handle TTS command message"""
     try:
-        # Parse the TTS command
-        try:
-            command = json.loads(msg.payload.decode())
-            text = command.get('text', '')
-        except json.JSONDecodeError:
-            # Try to treat the payload as plain text
-            text = msg.payload.decode().strip()
+        # Check if this is a button press or text input
+        payload = msg.payload.decode().strip()
         
-        if text:
-            # Execute text-to-speech
-            logger.info(f"Executing TTS for text: {text}")
-            threading.Thread(target=execute_tts, args=(text,)).start()
-            
-            # Send acknowledgment
-            ack_topic = f"{topic_prefix}/command/tts/response"
-            ack_payload = {
-                'timestamp': int(time.time()),
-                'status': 'success',
-                'text': text
-            }
-            publish_mqtt_message(ack_topic, json.dumps(ack_payload), retain=False)
+        if payload == "SPEAK":
+            # This is a button press, use the stored text
+            if hasattr(handle_tts_command, 'current_text') and handle_tts_command.current_text:
+                text = handle_tts_command.current_text
+                logger.info(f"Button pressed. Executing TTS for text: {text}")
+                threading.Thread(target=execute_tts, args=(text,)).start()
+                
+                # Send acknowledgment
+                ack_topic = f"{topic_prefix}/command/tts/response"
+                ack_payload = {
+                    'timestamp': int(time.time()),
+                    'status': 'success',
+                    'text': text
+                }
+                publish_mqtt_message(ack_topic, json.dumps(ack_payload), retain=False)
+            else:
+                logger.error("No text available for TTS")
+                
+                # Send error response
+                ack_topic = f"{topic_prefix}/command/tts/response"
+                ack_payload = {
+                    'timestamp': int(time.time()),
+                    'status': 'error',
+                    'message': 'No text provided'
+                }
+                publish_mqtt_message(ack_topic, json.dumps(ack_payload), retain=False)
         else:
-            logger.error("Received TTS command without text")
+            # This is text input or a direct TTS command with text
+            try:
+                # Try to parse as JSON
+                command = json.loads(payload)
+                text = command.get('text', '')
+            except json.JSONDecodeError:
+                # Use the payload as direct text
+                text = payload
             
-            # Send error response
-            ack_topic = f"{topic_prefix}/command/tts/response"
-            ack_payload = {
-                'timestamp': int(time.time()),
-                'status': 'error',
-                'message': 'No text provided'
-            }
-            publish_mqtt_message(ack_topic, json.dumps(ack_payload), retain=False)
+            if text:
+                # Store the text for button presses
+                handle_tts_command.current_text = text
+                
+                # Update the text input state
+                publish_mqtt_message(f"{topic_prefix}/tts_text/state", text, retain=True)
+                
+                # If this was a direct command with text (not just setting the input),
+                # execute TTS immediately
+                if msg.topic == f"{topic_prefix}/command/tts" and text != "SPEAK":
+                    logger.info(f"Direct command. Executing TTS for text: {text}")
+                    threading.Thread(target=execute_tts, args=(text,)).start()
+                    
+                    # Send acknowledgment
+                    ack_topic = f"{topic_prefix}/command/tts/response"
+                    ack_payload = {
+                        'timestamp': int(time.time()),
+                        'status': 'success',
+                        'text': text
+                    }
+                    publish_mqtt_message(ack_topic, json.dumps(ack_payload), retain=False)
+            else:
+                logger.error("Received empty text")
+                
+                # Send error response
+                ack_topic = f"{topic_prefix}/command/tts/response"
+                ack_payload = {
+                    'timestamp': int(time.time()),
+                    'status': 'error',
+                    'message': 'Empty text provided'
+                }
+                publish_mqtt_message(ack_topic, json.dumps(ack_payload), retain=False)
+    
     except Exception as e:
         logger.error(f"Error handling TTS command: {e}")
+        # Send error response
+        ack_topic = f"{topic_prefix}/command/tts/response"
+        ack_payload = {
+            'timestamp': int(time.time()),
+            'status': 'error',
+            'message': f'Error: {str(e)}'
+        }
+        publish_mqtt_message(ack_topic, json.dumps(ack_payload), retain=False)
 
 def handle_retroarch_status_command(msg, topic_prefix):
     """Handle RetroArch status command message"""
     try:
-        # Get RetroArch status
-        status_info = get_retroarch_status()
+        # For button press or direct command, get the status
+        payload = msg.payload.decode().strip()
         
-        # Prepare response
-        ack_topic = f"{topic_prefix}/command/retroarch/status/response"
-        if status_info:
-            ack_payload = {
-                'timestamp': int(time.time()),
-                'status': 'success',
-                'data': status_info
-            }
+        if payload == "GET_STATUS" or payload == "" or payload == "{}":
+            # Get RetroArch status
+            status_info = get_retroarch_status()
+            
+            # Prepare response
+            ack_topic = f"{topic_prefix}/command/retroarch/status/response"
+            if status_info:
+                ack_payload = {
+                    'timestamp': int(time.time()),
+                    'status': 'success',
+                    'data': status_info
+                }
+                
+                # Also publish to a status topic for sensors
+                publish_mqtt_message(f"{topic_prefix}/retroarch/status", json.dumps(status_info), retain=True)
+            else:
+                ack_payload = {
+                    'timestamp': int(time.time()),
+                    'status': 'error',
+                    'message': 'Failed to get RetroArch status, check if RetroArch is running with Network Commands enabled'
+                }
+            publish_mqtt_message(ack_topic, json.dumps(ack_payload), retain=False)
         else:
+            logger.error(f"Unexpected payload for status command: {payload}")
+            
+            # Send error response
+            ack_topic = f"{topic_prefix}/command/retroarch/status/response"
             ack_payload = {
                 'timestamp': int(time.time()),
                 'status': 'error',
-                'message': 'Failed to get RetroArch status, check if RetroArch is running with Network Commands enabled'
+                'message': f'Unexpected payload: {payload}'
             }
-        publish_mqtt_message(ack_topic, json.dumps(ack_payload), retain=False)
+            publish_mqtt_message(ack_topic, json.dumps(ack_payload), retain=False)
+    
     except Exception as e:
         logger.error(f"Error handling RetroArch status command: {e}")
         # Send error response
@@ -580,45 +669,90 @@ def handle_retroarch_status_command(msg, topic_prefix):
 def handle_retroarch_message_command(msg, topic_prefix):
     """Handle RetroArch message display command"""
     try:
-        # Parse the message command
-        try:
-            command = json.loads(msg.payload.decode())
-            message = command.get('message', '')
-        except json.JSONDecodeError:
-            # Try to treat the payload as plain text
-            message = msg.payload.decode().strip()
+        payload = msg.payload.decode().strip()
         
-        if message:
-            # Display the message on RetroArch screen
-            logger.info(f"Displaying message on RetroArch: {message}")
-            success = display_retroarch_message(message)
-            
-            # Send acknowledgment
-            ack_topic = f"{topic_prefix}/command/retroarch/message/response"
-            if success:
-                ack_payload = {
-                    'timestamp': int(time.time()),
-                    'status': 'success',
-                    'message': message
-                }
+        if payload == "DISPLAY":
+            # This is a button press, use the stored message
+            if hasattr(handle_retroarch_message_command, 'current_text') and handle_retroarch_message_command.current_text:
+                message = handle_retroarch_message_command.current_text
+                logger.info(f"Button pressed. Displaying message on RetroArch: {message}")
+                success = display_retroarch_message(message)
+                
+                # Send acknowledgment
+                ack_topic = f"{topic_prefix}/command/retroarch/message/response"
+                if success:
+                    ack_payload = {
+                        'timestamp': int(time.time()),
+                        'status': 'success',
+                        'message': message
+                    }
+                else:
+                    ack_payload = {
+                        'timestamp': int(time.time()),
+                        'status': 'error',
+                        'message': 'Failed to display message, check if RetroArch is running with Network Commands enabled'
+                    }
+                publish_mqtt_message(ack_topic, json.dumps(ack_payload), retain=False)
             else:
+                logger.error("No message available to display")
+                
+                # Send error response
+                ack_topic = f"{topic_prefix}/command/retroarch/message/response"
                 ack_payload = {
                     'timestamp': int(time.time()),
                     'status': 'error',
-                    'message': 'Failed to display message, check if RetroArch is running with Network Commands enabled'
+                    'message': 'No message provided'
                 }
-            publish_mqtt_message(ack_topic, json.dumps(ack_payload), retain=False)
+                publish_mqtt_message(ack_topic, json.dumps(ack_payload), retain=False)
         else:
-            logger.error("Received RetroArch message command without text")
+            # This is a direct message or JSON command
+            try:
+                # Try to parse as JSON
+                command = json.loads(payload)
+                message = command.get('message', '')
+            except json.JSONDecodeError:
+                # Use the payload as direct text
+                message = payload
             
-            # Send error response
-            ack_topic = f"{topic_prefix}/command/retroarch/message/response"
-            ack_payload = {
-                'timestamp': int(time.time()),
-                'status': 'error',
-                'message': 'No message provided'
-            }
-            publish_mqtt_message(ack_topic, json.dumps(ack_payload), retain=False)
+            if message:
+                # Store the message for button presses
+                handle_retroarch_message_command.current_text = message
+                
+                # Update the text input state
+                publish_mqtt_message(f"{topic_prefix}/retroarch_message_text/state", message, retain=True)
+                
+                # If this is a direct command (not from the text input), display message
+                if msg.topic == f"{topic_prefix}/command/retroarch/message" and message != "DISPLAY":
+                    logger.info(f"Direct command. Displaying message on RetroArch: {message}")
+                    success = display_retroarch_message(message)
+                    
+                    # Send acknowledgment
+                    ack_topic = f"{topic_prefix}/command/retroarch/message/response"
+                    if success:
+                        ack_payload = {
+                            'timestamp': int(time.time()),
+                            'status': 'success',
+                            'message': message
+                        }
+                    else:
+                        ack_payload = {
+                            'timestamp': int(time.time()),
+                            'status': 'error',
+                            'message': 'Failed to display message, check if RetroArch is running with Network Commands enabled'
+                        }
+                    publish_mqtt_message(ack_topic, json.dumps(ack_payload), retain=False)
+            else:
+                logger.error("Received empty message")
+                
+                # Send error response
+                ack_topic = f"{topic_prefix}/command/retroarch/message/response"
+                ack_payload = {
+                    'timestamp': int(time.time()),
+                    'status': 'error',
+                    'message': 'No message provided'
+                }
+                publish_mqtt_message(ack_topic, json.dumps(ack_payload), retain=False)
+    
     except Exception as e:
         logger.error(f"Error handling RetroArch message command: {e}")
         # Send error response
@@ -633,47 +767,94 @@ def handle_retroarch_message_command(msg, topic_prefix):
 def handle_retroarch_command_message(msg, topic_prefix):
     """Handle generic RetroArch command"""
     try:
-        # Parse the command
-        try:
-            command_obj = json.loads(msg.payload.decode())
-            command = command_obj.get('command', '')
-        except json.JSONDecodeError:
-            # Try to treat the payload as plain text
-            command = msg.payload.decode().strip()
+        payload = msg.payload.decode().strip()
         
-        if command:
-            # Send the command to RetroArch
-            logger.info(f"Sending command to RetroArch: {command}")
-            result = send_retroarch_command(command)
-            
-            # Send acknowledgment
-            ack_topic = f"{topic_prefix}/command/retroarch/response"
-            if result is not None:
-                ack_payload = {
-                    'timestamp': int(time.time()),
-                    'status': 'success',
-                    'command': command,
-                    'response': result if isinstance(result, str) else ''
-                }
+        if payload == "EXECUTE":
+            # This is a button press, use the stored command
+            if hasattr(handle_retroarch_command_message, 'current_text') and handle_retroarch_command_message.current_text:
+                command = handle_retroarch_command_message.current_text
+                logger.info(f"Button pressed. Sending command to RetroArch: {command}")
+                result = send_retroarch_command(command)
+                
+                # Send acknowledgment
+                ack_topic = f"{topic_prefix}/command/retroarch/response"
+                if result is not None:
+                    ack_payload = {
+                        'timestamp': int(time.time()),
+                        'status': 'success',
+                        'command': command,
+                        'response': result if isinstance(result, str) else ''
+                    }
+                else:
+                    ack_payload = {
+                        'timestamp': int(time.time()),
+                        'status': 'error',
+                        'command': command,
+                        'message': 'Failed to send command, check if RetroArch is running with Network Commands enabled'
+                    }
+                publish_mqtt_message(ack_topic, json.dumps(ack_payload), retain=False)
             else:
+                logger.error("No command available to execute")
+                
+                # Send error response
+                ack_topic = f"{topic_prefix}/command/retroarch/response"
                 ack_payload = {
                     'timestamp': int(time.time()),
                     'status': 'error',
-                    'command': command,
-                    'message': 'Failed to send command, check if RetroArch is running with Network Commands enabled'
+                    'message': 'No command provided'
                 }
-            publish_mqtt_message(ack_topic, json.dumps(ack_payload), retain=False)
+                publish_mqtt_message(ack_topic, json.dumps(ack_payload), retain=False)
         else:
-            logger.error("Received RetroArch command without any command")
+            # This is a direct command or JSON command
+            try:
+                # Try to parse as JSON
+                command_obj = json.loads(payload)
+                command = command_obj.get('command', '')
+            except json.JSONDecodeError:
+                # Use the payload as direct command
+                command = payload
             
-            # Send error response
-            ack_topic = f"{topic_prefix}/command/retroarch/response"
-            ack_payload = {
-                'timestamp': int(time.time()),
-                'status': 'error',
-                'message': 'No command provided'
-            }
-            publish_mqtt_message(ack_topic, json.dumps(ack_payload), retain=False)
+            if command:
+                # Store the command for button presses
+                handle_retroarch_command_message.current_text = command
+                
+                # Update the text input state
+                publish_mqtt_message(f"{topic_prefix}/retroarch_command_text/state", command, retain=True)
+                
+                # If this is a direct command (not from the text input), execute it
+                if msg.topic == f"{topic_prefix}/command/retroarch" and command != "EXECUTE":
+                    logger.info(f"Direct command. Sending command to RetroArch: {command}")
+                    result = send_retroarch_command(command)
+                    
+                    # Send acknowledgment
+                    ack_topic = f"{topic_prefix}/command/retroarch/response"
+                    if result is not None:
+                        ack_payload = {
+                            'timestamp': int(time.time()),
+                            'status': 'success',
+                            'command': command,
+                            'response': result if isinstance(result, str) else ''
+                        }
+                    else:
+                        ack_payload = {
+                            'timestamp': int(time.time()),
+                            'status': 'error',
+                            'command': command,
+                            'message': 'Failed to send command, check if RetroArch is running with Network Commands enabled'
+                        }
+                    publish_mqtt_message(ack_topic, json.dumps(ack_payload), retain=False)
+            else:
+                logger.error("Received empty command")
+                
+                # Send error response
+                ack_topic = f"{topic_prefix}/command/retroarch/response"
+                ack_payload = {
+                    'timestamp': int(time.time()),
+                    'status': 'error',
+                    'message': 'No command provided'
+                }
+                publish_mqtt_message(ack_topic, json.dumps(ack_payload), retain=False)
+    
     except Exception as e:
         logger.error(f"Error handling RetroArch command: {e}")
         # Send error response
@@ -688,18 +869,25 @@ def handle_retroarch_command_message(msg, topic_prefix):
 def handle_ui_mode_command(msg, topic_prefix):
     """Handle EmulationStation UI mode change command"""
     try:
-        # Parse the command
+        # For select entity, the payload is just the mode
+        mode = msg.payload.decode().strip()
+        
+        # Check if the message is in JSON format
         try:
-            command_obj = json.loads(msg.payload.decode())
-            mode = command_obj.get('mode', '')
+            command_obj = json.loads(mode)
+            if isinstance(command_obj, dict) and 'mode' in command_obj:
+                mode = command_obj.get('mode', '')
         except json.JSONDecodeError:
-            # Try to treat the payload as plain text
-            mode = msg.payload.decode().strip()
+            # Already have mode as plain text
+            pass
         
         if mode and mode in ['Full', 'Kid', 'Kiosk']:
             # Change the UI mode
             logger.info(f"Changing EmulationStation UI mode to: {mode}")
             success = change_es_ui_mode(mode)
+            
+            # Update the mode state
+            publish_mqtt_message(f"{topic_prefix}/ui_mode/state", mode, retain=True)
             
             # Send acknowledgment
             ack_topic = f"{topic_prefix}/command/ui_mode/response"
@@ -743,25 +931,41 @@ def handle_ui_mode_command(msg, topic_prefix):
 def handle_scan_games_command(msg, topic_prefix):
     """Handle game collection scan command"""
     try:
-        # Start the scan
-        logger.info("Received command to scan game collection")
-        success = scan_game_collection()
+        # Button press or direct command
+        payload = msg.payload.decode().strip()
         
-        # Send acknowledgment
-        ack_topic = f"{topic_prefix}/command/scan_games/response"
-        if success:
-            ack_payload = {
-                'timestamp': int(time.time()),
-                'status': 'success',
-                'message': 'Game collection scan started in the background'
-            }
+        if payload == "SCAN" or payload == "" or payload == "{}":
+            # Start the scan
+            logger.info("Received command to scan game collection")
+            success = scan_game_collection()
+            
+            # Send acknowledgment
+            ack_topic = f"{topic_prefix}/command/scan_games/response"
+            if success:
+                ack_payload = {
+                    'timestamp': int(time.time()),
+                    'status': 'success',
+                    'message': 'Game collection scan started in the background'
+                }
+            else:
+                ack_payload = {
+                    'timestamp': int(time.time()),
+                    'status': 'error',
+                    'message': 'Failed to start game collection scan. Check logs for details.'
+                }
+            publish_mqtt_message(ack_topic, json.dumps(ack_payload), retain=False)
         else:
+            logger.error(f"Unexpected payload for scan command: {payload}")
+            
+            # Send error response
+            ack_topic = f"{topic_prefix}/command/scan_games/response"
             ack_payload = {
                 'timestamp': int(time.time()),
                 'status': 'error',
-                'message': 'Failed to start game collection scan. Check logs for details.'
+                'message': f'Unexpected payload: {payload}'
             }
-        publish_mqtt_message(ack_topic, json.dumps(ack_payload), retain=False)
+            publish_mqtt_message(ack_topic, json.dumps(ack_payload), retain=False)
+    
     except Exception as e:
         logger.error(f"Error handling scan games command: {e}")
         # Send error response
@@ -1325,20 +1529,31 @@ def register_with_ha():
         "origin": origin_info
     }
     
-    # Register TTS service as a device trigger
-    tts_service_config = {
-        "automation_type": "trigger",
-        "type": "action",
-        "subtype": "tts",
+    # Register TTS input text entity
+    tts_input_config = {
         "device": device_info,
-        "topic": f"{topic_prefix}/command/tts",
-        "availability": availability,
-        "payload": "{{payload}}",
-        "payload_template": "{{payload_template}}",
-        "value_template": "{{value}}",
-        "name": f"RetroPie {device_name} TTS",
-        "unique_id": f"retropie_{safe_device_name}_tts",
+        "name": f"RetroPie {device_name} TTS Text",
+        "unique_id": f"retropie_{safe_device_name}_tts_text",
+        "state_topic": f"{topic_prefix}/tts_text/state",
+        "command_topic": f"{topic_prefix}/tts_text/set",
         "icon": "mdi:text-to-speech",
+        "availability": availability,
+        "availability_mode": "all",
+        "retain": False,
+        "enabled_by_default": True,
+        "origin": origin_info
+    }
+    
+    # Register TTS button entity
+    tts_button_config = {
+        "device": device_info,
+        "name": f"RetroPie {device_name} TTS Speak",
+        "unique_id": f"retropie_{safe_device_name}_tts_speak",
+        "command_topic": f"{topic_prefix}/command/tts",
+        "payload_press": "SPEAK",
+        "icon": "mdi:text-to-speech",
+        "availability": availability,
+        "availability_mode": "all",
         "enabled_by_default": True,
         "origin": origin_info
     }
@@ -1500,142 +1715,177 @@ def register_with_ha():
         logger.info(f"Published kid-friendly games sensor config")
         
         client.publish(
-            f"homeassistant/device_automation/retropie_{safe_device_name}/tts/config",
-            json.dumps(tts_service_config),
+            f"homeassistant/text/retropie_{safe_device_name}/tts_text/config",
+            json.dumps(tts_input_config),
             qos=1,
             retain=True
         )
-        logger.info(f"Published TTS service config")
+        logger.info(f"Published TTS text input config")
         
-        # Register RetroArch message service
-        retroarch_message_config = {
-            "automation_type": "trigger",
-            "type": "action",
-            "subtype": "retroarch_message",
+        client.publish(
+            f"homeassistant/button/retropie_{safe_device_name}/tts_speak/config",
+            json.dumps(tts_button_config),
+            qos=1,
+            retain=True
+        )
+        logger.info(f"Published TTS button config")
+        
+        # Register RetroArch message input text
+        retroarch_message_input_config = {
             "device": device_info,
-            "topic": f"{topic_prefix}/command/retroarch/message",
-            "availability": availability,
-            "payload": "{{payload}}",
-            "payload_template": "{{payload_template}}",
-            "value_template": "{{value}}",
-            "name": f"RetroPie {device_name} RetroArch Message",
-            "unique_id": f"retropie_{safe_device_name}_retroarch_message",
+            "name": f"RetroPie {device_name} RetroArch Message Text",
+            "unique_id": f"retropie_{safe_device_name}_retroarch_message_text",
+            "state_topic": f"{topic_prefix}/retroarch_message_text/state",
+            "command_topic": f"{topic_prefix}/retroarch_message_text/set",
             "icon": "mdi:message-text",
+            "availability": availability,
+            "availability_mode": "all",
+            "retain": False,
             "enabled_by_default": True,
             "origin": origin_info
         }
         
         client.publish(
-            f"homeassistant/device_automation/retropie_{safe_device_name}/retroarch_message/config",
-            json.dumps(retroarch_message_config),
+            f"homeassistant/text/retropie_{safe_device_name}/retroarch_message_text/config",
+            json.dumps(retroarch_message_input_config),
             qos=1,
             retain=True
         )
-        logger.info(f"Published RetroArch message service config")
+        logger.info(f"Published RetroArch message text input config")
         
-        # Register RetroArch command service
-        retroarch_command_config = {
-            "automation_type": "trigger",
-            "type": "action",
-            "subtype": "retroarch_command",
+        # Register RetroArch message button
+        retroarch_message_button_config = {
             "device": device_info,
-            "topic": f"{topic_prefix}/command/retroarch",
+            "name": f"RetroPie {device_name} Display Message",
+            "unique_id": f"retropie_{safe_device_name}_retroarch_display_message",
+            "command_topic": f"{topic_prefix}/command/retroarch/message",
+            "payload_press": "DISPLAY",
+            "icon": "mdi:message-text",
             "availability": availability,
-            "payload": "{{payload}}",
-            "payload_template": "{{payload_template}}",
-            "value_template": "{{value}}",
-            "name": f"RetroPie {device_name} RetroArch Command",
-            "unique_id": f"retropie_{safe_device_name}_retroarch_command",
+            "availability_mode": "all",
+            "enabled_by_default": True,
+            "origin": origin_info
+        }
+        
+        client.publish(
+            f"homeassistant/button/retropie_{safe_device_name}/retroarch_display_message/config",
+            json.dumps(retroarch_message_button_config),
+            qos=1,
+            retain=True
+        )
+        logger.info(f"Published RetroArch message button config")
+        
+        # Register RetroArch command input text
+        retroarch_command_input_config = {
+            "device": device_info,
+            "name": f"RetroPie {device_name} RetroArch Command Text",
+            "unique_id": f"retropie_{safe_device_name}_retroarch_command_text",
+            "state_topic": f"{topic_prefix}/retroarch_command_text/state",
+            "command_topic": f"{topic_prefix}/retroarch_command_text/set",
             "icon": "mdi:gamepad-variant",
+            "availability": availability,
+            "availability_mode": "all",
+            "retain": False,
             "enabled_by_default": True,
             "origin": origin_info
         }
         
         client.publish(
-            f"homeassistant/device_automation/retropie_{safe_device_name}/retroarch_command/config",
-            json.dumps(retroarch_command_config),
+            f"homeassistant/text/retropie_{safe_device_name}/retroarch_command_text/config",
+            json.dumps(retroarch_command_input_config),
             qos=1,
             retain=True
         )
-        logger.info(f"Published RetroArch command service config")
+        logger.info(f"Published RetroArch command text input config")
         
-        # Register RetroArch status service
-        retroarch_status_config = {
-            "automation_type": "trigger",
-            "type": "action",
-            "subtype": "retroarch_status",
+        # Register RetroArch command button
+        retroarch_command_button_config = {
             "device": device_info,
-            "topic": f"{topic_prefix}/command/retroarch/status",
+            "name": f"RetroPie {device_name} Execute Command",
+            "unique_id": f"retropie_{safe_device_name}_retroarch_execute_command",
+            "command_topic": f"{topic_prefix}/command/retroarch",
+            "payload_press": "EXECUTE",
+            "icon": "mdi:gamepad-variant",
             "availability": availability,
-            "payload": "{{payload}}",
-            "payload_template": "{{payload_template}}",
-            "value_template": "{{value}}",
-            "name": f"RetroPie {device_name} RetroArch Status",
-            "unique_id": f"retropie_{safe_device_name}_retroarch_status",
+            "availability_mode": "all",
+            "enabled_by_default": True,
+            "origin": origin_info
+        }
+        
+        client.publish(
+            f"homeassistant/button/retropie_{safe_device_name}/retroarch_execute_command/config",
+            json.dumps(retroarch_command_button_config),
+            qos=1,
+            retain=True
+        )
+        logger.info(f"Published RetroArch command button config")
+        
+        # Register RetroArch status button
+        retroarch_status_button_config = {
+            "device": device_info,
+            "name": f"RetroPie {device_name} Get Status",
+            "unique_id": f"retropie_{safe_device_name}_retroarch_get_status",
+            "command_topic": f"{topic_prefix}/command/retroarch/status",
+            "payload_press": "GET_STATUS",
             "icon": "mdi:information-outline",
+            "availability": availability,
+            "availability_mode": "all",
             "enabled_by_default": True,
             "origin": origin_info
         }
         
         client.publish(
-            f"homeassistant/device_automation/retropie_{safe_device_name}/retroarch_status/config",
-            json.dumps(retroarch_status_config),
+            f"homeassistant/button/retropie_{safe_device_name}/retroarch_get_status/config",
+            json.dumps(retroarch_status_button_config),
             qos=1,
             retain=True
         )
-        logger.info(f"Published RetroArch status service config")
+        logger.info(f"Published RetroArch status button config")
         
-        # Register UI mode service
-        ui_mode_config = {
-            "automation_type": "trigger",
-            "type": "action",
-            "subtype": "ui_mode",
+        # Register UI mode select entity
+        ui_mode_select_config = {
             "device": device_info,
-            "topic": f"{topic_prefix}/command/ui_mode",
-            "availability": availability,
-            "payload": "{{payload}}",
-            "payload_template": "{{payload_template}}",
-            "value_template": "{{value}}",
             "name": f"RetroPie {device_name} UI Mode",
-            "unique_id": f"retropie_{safe_device_name}_ui_mode",
+            "unique_id": f"retropie_{safe_device_name}_ui_mode_select",
+            "state_topic": f"{topic_prefix}/ui_mode/state",
+            "command_topic": f"{topic_prefix}/command/ui_mode",
+            "options": ["Full", "Kid", "Kiosk"],
             "icon": "mdi:view-dashboard",
-            "enabled_by_default": True,
-            "origin": origin_info
-        }
-        
-        client.publish(
-            f"homeassistant/device_automation/retropie_{safe_device_name}/ui_mode/config",
-            json.dumps(ui_mode_config),
-            qos=1,
-            retain=True
-        )
-        logger.info(f"Published UI mode service config")
-        
-        # Register scan games service
-        scan_games_config = {
-            "automation_type": "trigger",
-            "type": "action",
-            "subtype": "scan_games",
-            "device": device_info,
-            "topic": f"{topic_prefix}/command/scan_games",
             "availability": availability,
-            "payload": "{{payload}}",
-            "payload_template": "{{payload_template}}",
-            "value_template": "{{value}}",
-            "name": f"RetroPie {device_name} Scan Games",
-            "unique_id": f"retropie_{safe_device_name}_scan_games",
-            "icon": "mdi:database-search",
+            "availability_mode": "all",
             "enabled_by_default": True,
             "origin": origin_info
         }
         
         client.publish(
-            f"homeassistant/device_automation/retropie_{safe_device_name}/scan_games/config",
-            json.dumps(scan_games_config),
+            f"homeassistant/select/retropie_{safe_device_name}/ui_mode/config",
+            json.dumps(ui_mode_select_config),
             qos=1,
             retain=True
         )
-        logger.info(f"Published scan games service config")
+        logger.info(f"Published UI mode select config")
+        
+        # Register scan games button
+        scan_games_button_config = {
+            "device": device_info,
+            "name": f"RetroPie {device_name} Scan Games",
+            "unique_id": f"retropie_{safe_device_name}_scan_games_button",
+            "command_topic": f"{topic_prefix}/command/scan_games",
+            "payload_press": "SCAN",
+            "icon": "mdi:database-search",
+            "availability": availability,
+            "availability_mode": "all",
+            "enabled_by_default": True,
+            "origin": origin_info
+        }
+        
+        client.publish(
+            f"homeassistant/button/retropie_{safe_device_name}/scan_games/config",
+            json.dumps(scan_games_button_config),
+            qos=1,
+            retain=True
+        )
+        logger.info(f"Published scan games button config")
         
         # Also publish an initial status message to make the sensors available immediately
         status_payload = {
