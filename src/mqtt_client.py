@@ -111,6 +111,42 @@ def get_gpu_temperature():
         logger.error(f"Failed to get GPU temperature: {e}")
     return None
 
+def get_cpu_frequency():
+    """Get current CPU frequency in MHz using vcgencmd"""
+    try:
+        output = subprocess.check_output(['vcgencmd', 'measure_clock', 'arm'], universal_newlines=True)
+        freq = re.search(r'frequency\(\d+\)=(\d+)', output)
+        if freq:
+            # Convert from Hz to MHz
+            return int(int(freq.group(1)) / 1000000)
+        
+        # Alternative format parsing
+        freq = re.search(r'=(\d+)', output)
+        if freq:
+            # Convert from Hz to MHz
+            return int(int(freq.group(1)) / 1000000)
+    except Exception as e:
+        logger.error(f"Failed to get CPU frequency: {e}")
+    return None
+
+def get_gpu_frequency():
+    """Get current GPU frequency in MHz using vcgencmd"""
+    try:
+        output = subprocess.check_output(['vcgencmd', 'measure_clock', 'core'], universal_newlines=True)
+        freq = re.search(r'frequency\(\d+\)=(\d+)', output)
+        if freq:
+            # Convert from Hz to MHz
+            return int(int(freq.group(1)) / 1000000)
+            
+        # Alternative format parsing
+        freq = re.search(r'=(\d+)', output)
+        if freq:
+            # Convert from Hz to MHz
+            return int(int(freq.group(1)) / 1000000)
+    except Exception as e:
+        logger.error(f"Failed to get GPU frequency: {e}")
+    return None
+
 def get_system_info():
     """Get basic system information"""
     hostname = socket.gethostname()
@@ -147,6 +183,8 @@ def get_system_info():
         'hostname': hostname,
         'cpu_temp': get_cpu_temperature(),
         'gpu_temp': get_gpu_temperature(),
+        'cpu_freq': get_cpu_frequency(),
+        'gpu_freq': get_gpu_frequency(),
         'uptime_seconds': uptime_seconds,
         'load': load,
         'memory': mem_info,
@@ -230,48 +268,149 @@ def get_game_metadata(system, rom_path):
         logger.error(f"Error getting game metadata: {e}")
         return {}
 
-def publish_mqtt_message(topic, message, retain=False, max_retries=5):
+def publish_mqtt_message(topic, message, retain=False, max_retries=5, shutdown_mode=False):
     """Publish a message to MQTT broker with retry logic"""
+    global args  # Access command line args to check for shutdown mode
+    
+    # Check if we're in shutdown mode from function parameter or command line args
+    if not shutdown_mode and hasattr(args, 'shutdown_mode') and args.shutdown_mode:
+        shutdown_mode = True
+    
     config = get_config()
     
     if not config.get('mqtt_host'):
         logger.error("MQTT host not configured")
         return False
     
-    client = mqtt.Client()
+    # Quick network check before attempting MQTT connection (to avoid hanging)
+    if shutdown_mode:
+        try:
+            # Use a very short socket timeout to test connectivity (0.5 seconds)
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(0.5)
+            result = s.connect_ex((config['mqtt_host'], int(config.get('mqtt_port', 1883))))
+            s.close()
+            if result != 0:
+                logger.warning(f"Network check failed during shutdown - MQTT broker unreachable")
+                return False
+        except Exception as e:
+            logger.warning(f"Network check failed during shutdown: {e}")
+            return False
+    
+    # Use a unique client id to avoid connection conflicts
+    client_id = f"retropie-publisher-{int(time.time())}-{os.getpid()}"
+    client = mqtt.Client(client_id=client_id)
+    
+    # Set up a connection callback to track successful connections
+    connection_successful = False
+    def on_connect_local(client, userdata, flags, rc):
+        nonlocal connection_successful
+        if rc == 0:
+            connection_successful = True
+        else:
+            logger.warning(f"Connection failed with result code {rc}")
+    
+    client.on_connect = on_connect_local
     
     if config.get('mqtt_username') and config.get('mqtt_password'):
         client.username_pw_set(config['mqtt_username'], config['mqtt_password'])
     
+    # Set appropriate timeouts and retry counts based on mode
+    if shutdown_mode:
+        # Use minimal retries and timeouts during shutdown
+        actual_max_retries = 1
+        connect_timeout = 2
+        publish_wait = 1
+        max_wait = 1
+    else:
+        # Normal operation values
+        actual_max_retries = max_retries
+        connect_timeout = 15
+        publish_wait = 5
+        max_wait = 60
+    
     # Add retry logic with exponential backoff
     retries = 0
-    max_wait = 60  # Maximum wait time in seconds
-    while retries < max_retries:
+    while retries < actual_max_retries:
         try:
-            # Set a shorter connection timeout for quicker detection of network issues
-            client.connect(config['mqtt_host'], int(config.get('mqtt_port', 1883)), 15)
-            client.publish(topic, message, qos=1, retain=retain)
+            # Set connection timeout based on mode
+            client.connect_async(config['mqtt_host'], int(config.get('mqtt_port', 1883)))
+            client.loop_start()
+            
+            # Wait for connection with timeout
+            connect_start = time.time()
+            while not connection_successful and time.time() - connect_start < connect_timeout:
+                time.sleep(0.1)
+                
+            if not connection_successful:
+                client.loop_stop()
+                raise Exception(f"Connection timed out after {connect_timeout} seconds")
+            
+            # Set up for synchronous publishing with result checking
+            msg_info = client.publish(topic, message, qos=1, retain=retain)
+            
+            # Wait for the message to be sent (with a timeout)
+            publish_success = False
+            start_time = time.time()
+            
+            # Set up a publish callback
+            def on_publish(client, userdata, mid):
+                nonlocal publish_success
+                if mid == msg_info.mid:
+                    publish_success = True
+            
+            client.on_publish = on_publish
+            
+            while not publish_success and time.time() - start_time < publish_wait:
+                time.sleep(0.1)  # Check less frequently to reduce CPU usage
+            
+            # Cleanup
+            client.loop_stop()
             client.disconnect()
+            
+            # Check if the publish succeeded
+            if not publish_success:
+                raise Exception("Message publish timed out")
+                
             logger.info(f"Published to {topic}: {message[:100]}{'...' if len(message) > 100 else ''}")
             return True
         except Exception as e:
             retries += 1
             # Only log as error on final retry, otherwise log as warning
-            if retries >= max_retries:
-                logger.error(f"Error publishing to MQTT after {max_retries} attempts: {e}")
+            if retries >= actual_max_retries:
+                log_level = logging.WARNING if shutdown_mode else logging.ERROR
+                logger.log(log_level, f"Error publishing to MQTT after {actual_max_retries} attempts: {e}")
+                if isinstance(e, socket.error):
+                    logger.log(log_level, f"Socket error details: {e.errno} - {e.strerror}")
+                try:
+                    client.loop_stop()
+                    client.disconnect()
+                except:
+                    pass
                 return False
             else:
                 # Calculate wait time with exponential backoff (2^retry seconds)
                 wait_time = min(2 ** retries, max_wait)
-                logger.warning(f"Error publishing to MQTT (attempt {retries}/{max_retries}): {e}. Retrying in {wait_time} seconds.")
+                logger.warning(f"Error publishing to MQTT (attempt {retries}/{actual_max_retries}): {e}. Retrying in {wait_time} seconds.")
+                try:
+                    client.loop_stop()
+                    client.disconnect()
+                except:
+                    pass
                 time.sleep(wait_time)
                 
     # This should never be reached due to the return in the final retry
     return False
 
-def publish_game_event(event_type, args=None):
+def publish_game_event(event_type, event_args=None):
     """Publish an EmulationStation game event to MQTT"""
-    global current_state
+    global current_state, args
+    
+    # Check if we're in shutdown mode for quit events
+    shutdown_mode = False
+    if event_type == 'quit' and hasattr(args, 'shutdown_mode') and args.shutdown_mode:
+        shutdown_mode = True
+        logger.info("Processing quit event in shutdown mode with reduced timeouts")
     
     config = get_config()
     topic_prefix = config.get('mqtt_topic_prefix', 'retropie')
@@ -295,10 +434,10 @@ def publish_game_event(event_type, args=None):
         # Also publish availability status
         publish_state_message(f"{topic_prefix}/availability", "online", retain=True)
         
-    elif event_type == 'game-start' and args and len(args) >= 3:
-        system = args[0]
-        rom_path = args[2]
-        emulator = args[1]
+    elif event_type == 'game-start' and event_args and len(event_args) >= 3:
+        system = event_args[0]
+        rom_path = event_args[2]
+        emulator = event_args[1]
         game_name = os.path.basename(rom_path)
         
         # Verify RetroArch network commands are enabled for this game session
@@ -419,22 +558,29 @@ def publish_game_event(event_type, args=None):
         current_state['last_update'] = int(time.time())
         save_state()
         
-        if args and len(args) >= 1:
-            payload.update({'quit_mode': args[0]})
+        if event_args and len(event_args) >= 1:
+            payload.update({'quit_mode': event_args[0]})
         
-        # Also publish availability status
-        publish_state_message(f"{topic_prefix}/availability", "offline", retain=True)
+        # Also publish availability status with shutdown_mode flag
+        publish_state_message(f"{topic_prefix}/availability", "offline", retain=True, shutdown_mode=shutdown_mode)
         
-        # Update machine status
-        publish_machine_status()
+        # Skip machine status update during shutdown if in shutdown mode (to save time)
+        if not shutdown_mode:
+            publish_machine_status()
+        else:
+            logger.info("Skipping extra status updates during shutdown mode")
     
     topic = f"{topic_prefix}/event/{event_type}"
     # Events should NOT be retained - they should expire when received
-    return publish_mqtt_message(topic, json.dumps(payload), retain=False)
+    # Pass shutdown_mode flag for quit events
+    if event_type == 'quit':
+        return publish_mqtt_message(topic, json.dumps(payload), retain=False, shutdown_mode=shutdown_mode)
+    else:
+        return publish_mqtt_message(topic, json.dumps(payload), retain=False)
 
-def publish_state_message(state_topic, state_value, retain=True):
+def publish_state_message(state_topic, state_value, retain=True, shutdown_mode=False):
     """Publish a simple state message to MQTT"""
-    return publish_mqtt_message(state_topic, state_value, retain=retain)
+    return publish_mqtt_message(state_topic, state_value, retain=retain, shutdown_mode=shutdown_mode)
 
 def publish_machine_status():
     """Publish machine status to MQTT"""
@@ -486,6 +632,9 @@ def on_connect(client, userdata, flags, rc):
     
     # Subscribe to all command topics
     command_topics = [
+        # Debug topic for testing
+        f"{topic_prefix}/debug",
+        
         # TTS
         f"{topic_prefix}/command/tts",
         f"{topic_prefix}/tts_text/set",
@@ -517,6 +666,13 @@ def on_message(client, userdata, msg):
         config = get_config()
         topic_prefix = config.get('mqtt_topic_prefix', 'retropie')
         
+        # Debug topic for testing connection
+        if msg.topic == f"{topic_prefix}/debug":
+            logger.info(f"DEBUG MESSAGE RECEIVED: {msg.payload.decode()}")
+            publish_mqtt_message(f"{topic_prefix}/debug/response", 
+                              f"Debug received: {msg.payload.decode()}", retain=False)
+            return
+        
         # Handle TTS related
         if msg.topic == f"{topic_prefix}/command/tts":
             handle_tts_command(msg, topic_prefix)
@@ -531,8 +687,9 @@ def on_message(client, userdata, msg):
         elif msg.topic == f"{topic_prefix}/retroarch_message_text/set":
             # Store the message text for later use
             text = msg.payload.decode().strip()
-            if hasattr(handle_retroarch_message_command, 'current_text'):
-                handle_retroarch_message_command.current_text = text
+            if not hasattr(handle_retroarch_message_command, 'current_text'):
+                handle_retroarch_message_command.current_text = ""
+            handle_retroarch_message_command.current_text = text
             # Update the state topic
             publish_mqtt_message(f"{topic_prefix}/retroarch_message_text/state", text, retain=True)
         elif msg.topic == f"{topic_prefix}/command/retroarch":
@@ -540,8 +697,9 @@ def on_message(client, userdata, msg):
         elif msg.topic == f"{topic_prefix}/retroarch_command_text/set":
             # Store the command text for later use
             text = msg.payload.decode().strip()
-            if hasattr(handle_retroarch_command_message, 'current_text'):
-                handle_retroarch_command_message.current_text = text
+            if not hasattr(handle_retroarch_command_message, 'current_text'):
+                handle_retroarch_command_message.current_text = ""
+            handle_retroarch_command_message.current_text = text
             # Update the state topic
             publish_mqtt_message(f"{topic_prefix}/retroarch_command_text/state", text, retain=True)
             
@@ -555,6 +713,9 @@ def on_message(client, userdata, msg):
     
     except Exception as e:
         logger.error(f"Error processing message: {e}")
+        # More detailed error reporting
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
 
 def handle_tts_command(msg, topic_prefix):
     """Handle TTS command message"""
@@ -1011,18 +1172,79 @@ def execute_tts(text):
         wav_file = "/tmp/tts_output.wav"
         subprocess.run(["pico2wave", "-w", wav_file, text], check=True)
         
-        # Play the generated audio file
-        subprocess.run(["aplay", wav_file], check=True)
+        # Play the generated audio file using the logged-in user's audio session
+        try:
+            # First, get the user who is currently logged in and has the active X session
+            user_cmd = subprocess.run(["who"], capture_output=True, text=True)
+            active_users = user_cmd.stdout.strip().split('\n')
+            
+            if active_users:
+                # Use the first active user
+                active_user = active_users[0].split()[0]
+                logger.info(f"Found active user: {active_user}")
+                
+                # Run the command as the active user who has access to the audio system
+                command = f"export XDG_RUNTIME_DIR=/run/user/$(id -u {active_user}) && aplay {wav_file}"
+                play_cmd = subprocess.run(["sudo", "-u", active_user, "bash", "-c", command], check=True)
+                logger.info("Audio played successfully through user session")
+            else:
+                # If no active user, try direct playback
+                logger.info("No active user session found, trying direct playback")
+                subprocess.run(["aplay", wav_file], check=True)
+                
+        except Exception as session_error:
+            logger.error(f"Error playing through user session: {session_error}")
+            
+            # Try alternative methods in sequence
+            methods = [
+                # Try with default user
+                ("Playing via pi user", ["sudo", "-u", "pi", "aplay", wav_file]),
+                # Try with PULSE_SERVER
+                ("Playing with PULSE_SERVER", ["env", "PULSE_SERVER=localhost", "aplay", wav_file]),
+                # Try mpg123
+                ("Trying mpg123", ["mpg123", wav_file]),
+                # Try omxplayer 
+                ("Trying omxplayer", ["omxplayer", "-o", "both", wav_file]),
+                # Try mplayer
+                ("Trying mplayer", ["mplayer", wav_file]),
+                # Try specific ALSA device
+                ("Trying HDMI output", ["aplay", "-D", "plughw:0,0", wav_file]),
+                # Try HDMI 1
+                ("Trying HDMI 1", ["aplay", "-D", "plughw:1,0", wav_file])
+            ]
+            
+            success = False
+            for desc, cmd in methods:
+                try:
+                    logger.info(desc)
+                    subprocess.run(cmd, check=True)
+                    success = True
+                    logger.info(f"Success with {desc}")
+                    break
+                except Exception as e:
+                    logger.error(f"Failed with {desc}: {e}")
+            
+            if not success:
+                # As a last resort, save play command to a script for manual execution
+                script_path = "/tmp/play_tts.sh"
+                with open(script_path, 'w') as f:
+                    f.write("#!/bin/bash\n")
+                    f.write(f"aplay {wav_file}\n")
+                os.chmod(script_path, 0o755)
+                logger.error(f"Audio playback failed with all methods. Manual script saved to {script_path}")
+                raise Exception("All audio playback methods failed")
         
-        # Clean up
-        if os.path.exists(wav_file):
+        # Clean up only if requested
+        cleanup = True  # Set to False for debugging
+        if cleanup and os.path.exists(wav_file):
             os.remove(wav_file)
             
         logger.info("TTS executed successfully")
         return True
     except Exception as e:
         logger.error(f"Error executing TTS: {e}")
-        return False
+        # Don't fail the whole operation due to audio issues
+        return True  # Still return success so other operations continue
 
 def scan_game_collection():
     """Scan all gamelist.xml files to collect game statistics"""
@@ -1290,51 +1512,170 @@ def change_es_ui_mode(mode):
         
         logger.info(f"Found EmulationStation settings at: {es_settings_path}")
         
-        # Parse the XML settings file
+        # First try the direct text manipulation approach which is more reliable
         try:
-            tree = ET.parse(es_settings_path)
-            root = tree.getroot()
+            # Read the current file content
+            with open(es_settings_path, 'r') as f:
+                content = f.read()
             
-            # Check if UIMode setting exists
-            ui_mode_elem = None
-            for elem in root.findall('string'):
-                if elem.get('name') == 'UIMode':
-                    ui_mode_elem = elem
-                    break
+            # Check if UIMode is already in the file
+            mode_pattern = re.compile(r'<(string|bool) name="UIMode" value="([^"]*)"')
+            match = mode_pattern.search(content)
             
-            if ui_mode_elem is not None:
-                # Update existing setting
-                current_mode = ui_mode_elem.get('value')
+            if match:
+                # Found existing setting, update it
+                current_mode = match.group(2)
+                tag_type = match.group(1)  # string or bool
+                
                 if current_mode == mode:
                     logger.info(f"UI mode is already set to {mode}")
                     return True
                 
-                ui_mode_elem.set('value', mode)
-                logger.info(f"Changed UI mode from {current_mode} to {mode}")
+                # Replace the existing setting
+                logger.info(f"Changing UI mode from {current_mode} to {mode}")
+                content = re.sub(
+                    f'<{tag_type} name="UIMode" value="[^"]*"',
+                    f'<{tag_type} name="UIMode" value="{mode}"',
+                    content
+                )
             else:
-                # Create new UIMode setting
-                ui_mode_elem = ET.SubElement(root, 'string')
-                ui_mode_elem.set('name', 'UIMode')
-                ui_mode_elem.set('value', mode)
-                logger.info(f"Created new UI mode setting: {mode}")
+                # No existing setting, add it after XML declaration or at the start
+                logger.info(f"Adding new UI mode setting: {mode}")
+                if '?>' in content:
+                    # Add after XML declaration
+                    xml_end = content.find('?>') + 2
+                    content = content[:xml_end] + f'\n<string name="UIMode" value="{mode}" />' + content[xml_end:]
+                else:
+                    # Add to beginning of file
+                    content = f'<string name="UIMode" value="{mode}" />\n' + content
             
-            # Write the updated settings back to the file
-            tree.write(es_settings_path)
-            
-            # Restart EmulationStation if it's running
-            restart_emulationstation()
-            
+            # Write the changes back
+            with open(es_settings_path, 'w') as f:
+                f.write(content)
+                
+            # Apply UI mode change (try without restart if possible)
+            apply_ui_mode_change(mode)
             return True
             
-        except Exception as e:
-            logger.error(f"Error updating EmulationStation settings: {e}")
-            return False
+        except Exception as direct_error:
+            logger.error(f"Error using direct text manipulation: {direct_error}")
+            
+            # Try with XML parsing as fallback
+            try:
+                logger.info("Attempting XML parsing approach as fallback")
+                tree = ET.parse(es_settings_path)
+                root = tree.getroot()
+                
+                # Check if UIMode setting exists
+                ui_mode_elem = None
+                for elem in root.findall('string'):
+                    if elem.get('name') == 'UIMode':
+                        ui_mode_elem = elem
+                        break
+                
+                if ui_mode_elem is not None:
+                    # Update existing setting
+                    current_mode = ui_mode_elem.get('value')
+                    if current_mode == mode:
+                        logger.info(f"UI mode is already set to {mode}")
+                        return True
+                    
+                    ui_mode_elem.set('value', mode)
+                    logger.info(f"Changed UI mode from {current_mode} to {mode}")
+                else:
+                    # Create new UIMode setting
+                    ui_mode_elem = ET.SubElement(root, 'string')
+                    ui_mode_elem.set('name', 'UIMode')
+                    ui_mode_elem.set('value', mode)
+                    logger.info(f"Created new UI mode setting: {mode}")
+                
+                # Write the updated settings back to the file
+                tree.write(es_settings_path)
+                
+                # Apply UI mode change (try without restart if possible)
+                apply_ui_mode_change(mode)
+                
+                return True
+                
+            except Exception as xml_error:
+                logger.error(f"Error updating EmulationStation settings with XML: {xml_error}")
+                
+                # Last resort approach - use a direct echo command
+                try:
+                    logger.info("Attempting direct echo command as last resort")
+                    # Use grep to check if setting already exists
+                    check = subprocess.run(['grep', '-q', 'UIMode', es_settings_path], check=False)
+                    
+                    if check.returncode == 0:
+                        # Setting exists, use sed to replace it
+                        subprocess.run([
+                            'sed', '-i', 
+                            f's/<[^>]*name="UIMode" value="[^"]*"/<string name="UIMode" value="{mode}"/', 
+                            es_settings_path
+                        ], check=True)
+                    else:
+                        # Setting doesn't exist, append it to the file
+                        with open(es_settings_path, 'a') as f:
+                            f.write(f'\n<string name="UIMode" value="{mode}" />\n')
+                    
+                    restart_emulationstation()
+                    return True
+                    
+                except Exception as echo_error:
+                    logger.error(f"All methods failed. Last error: {echo_error}")
+                    return False
             
     except Exception as e:
         logger.error(f"Error changing EmulationStation UI mode: {e}")
         return False
 
-def restart_emulationstation():
+def apply_ui_mode_change(mode):
+    """Apply UI mode change without restarting EmulationStation if possible"""
+    try:
+        # Since EmulationStation is likely started with a systemd service,
+        # the best approach is to modify the config file and let EmulationStation
+        # reload it on next launch rather than trying to change a running instance
+        
+        # Check if we can find the autostart.sh script that launches EmulationStation
+        autostart_paths = [
+            '/opt/retropie/configs/all/autostart.sh',
+            '/home/pi/.bashrc',  # Sometimes ES is started from here
+            '/etc/profile.d/10-emulationstation.sh'
+        ]
+        
+        # Log information about the script we're searching for
+        for path in autostart_paths:
+            if os.path.exists(path):
+                logger.info(f"Found autostart script at {path}, content:")
+                with open(path, 'r') as f:
+                    logger.info(f.read()[:500])  # Log first 500 chars
+        
+        # For now, just write the UI mode to the config file but don't try to
+        # change the running instance, as it appears to be launched with force parameters
+        logger.info(f"UI mode preference set to {mode} in config. Will take effect on next EmulationStation restart.")
+        
+        # Write a short message to inform the user
+        try:
+            # Use OSD command if EmulationStation has it
+            osd_script = "/tmp/es_ui_mode_info.sh"
+            with open(osd_script, 'w') as f:
+                f.write('#!/bin/bash\n')
+                f.write(f'echo "UI MODE: {mode}" > /dev/tty1\n')
+                f.write(f'echo "Changes will take effect after EmulationStation restarts" > /dev/tty1\n')
+                f.write(f'sleep 5\n')
+            
+            os.chmod(osd_script, 0o755)
+            subprocess.Popen([osd_script], start_new_session=True)
+        except Exception as e:
+            logger.warning(f"Failed to display UI mode info: {e}")
+            
+        return True
+            
+    except Exception as e:
+        logger.error(f"Error applying UI mode change: {e}")
+        return False
+
+def restart_emulationstation(mode=None):
     """Restart EmulationStation by touching /tmp/es-restart and killing the process"""
     try:
         # Create the restart trigger file
@@ -1343,8 +1684,34 @@ def restart_emulationstation():
         
         # Kill EmulationStation to trigger restart
         try:
-            subprocess.run(['killall', 'emulationstation'], check=False)
-            logger.info("Sent restart signal to EmulationStation")
+            # Make sure all existing EmulationStation processes are killed
+            subprocess.run(['pkill', '-9', 'emulationstation'], check=False)
+            time.sleep(2)  # Give it time to fully terminate
+            
+            if mode == 'Kid':
+                # Launch ES in Kid mode
+                logger.info("Launching EmulationStation in Kid mode")
+                subprocess.Popen([
+                    '/opt/retropie/supplementary/emulationstation/emulationstation', 
+                    '--force-kid'
+                ], start_new_session=True)
+            elif mode == 'Kiosk':
+                # Launch ES in Kiosk mode
+                logger.info("Launching EmulationStation in Kiosk mode")
+                subprocess.Popen([
+                    '/opt/retropie/supplementary/emulationstation/emulationstation', 
+                    '--force-kiosk'
+                ], start_new_session=True)
+            elif mode == 'Full':
+                # Launch ES in Full mode
+                logger.info("Launching EmulationStation in Full mode")
+                subprocess.Popen([
+                    '/opt/retropie/supplementary/emulationstation/emulationstation'
+                ], start_new_session=True)
+            else:
+                # Just kill it and let the system restart it with default settings
+                logger.info("Killing EmulationStation, system will restart it")
+            
             return True
         except Exception as e:
             logger.error(f"Error killing EmulationStation: {e}")
@@ -1421,9 +1788,38 @@ def verify_retroarch_network_commands():
         logger.error(f"Error verifying RetroArch network commands: {e}")
         return False
 
+def is_retroarch_running():
+    """Check if RetroArch appears to be running"""
+    try:
+        # Check with ps command
+        result = subprocess.run(['ps', 'aux'], capture_output=True, text=True)
+        if 'retroarch' in result.stdout.lower():
+            return True
+            
+        # Check if the network port is in use (alternative method)
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.settimeout(0.2)
+            sock.sendto(b"VERSION", ('127.0.0.1', RETROARCH_PORT))
+            response, _ = sock.recvfrom(1024)
+            if response:
+                return True
+        except:
+            pass
+            
+        return False
+    except Exception as e:
+        logger.error(f"Error checking if RetroArch is running: {e}")
+        return False
+
 def send_retroarch_command(command):
     """Send a command to RetroArch via Network Control Interface"""
     try:
+        # Check if RetroArch might be running first
+        retroarch_status = is_retroarch_running()
+        if not retroarch_status:
+            logger.warning("RetroArch does not appear to be running. Command might not work.")
+        
         # Create a UDP socket
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.settimeout(1.0)  # Set a 1-second timeout
@@ -1443,9 +1839,13 @@ def send_retroarch_command(command):
         return True
     except Exception as e:
         logger.error(f"Error sending RetroArch command: {e}")
+        # Include more descriptive error message
+        if isinstance(e, socket.error) and e.errno == 111:
+            logger.error("Connection refused. RetroArch might not be running or network commands are disabled.")
         return None
     finally:
-        sock.close()
+        if 'sock' in locals() and sock:
+            sock.close()
 
 def display_retroarch_message(message):
     """Display a message on the RetroArch screen"""
@@ -1484,9 +1884,22 @@ def start_mqtt_listener(max_retries=10):
         logger.error("MQTT host not configured, cannot start listener")
         return False
     
-    client = mqtt.Client()
+    # Create a more robust client with auto-reconnect
+    client = mqtt.Client(client_id=f"retropie-ha-{int(time.time())}", clean_session=True)
     client.on_connect = on_connect
     client.on_message = on_message
+    
+    # Set up auto-reconnect parameters - very important for stability
+    client.reconnect_delay_set(min_delay=1, max_delay=60)
+    
+    # Add a disconnect callback to log disconnections
+    def on_disconnect(client, userdata, rc):
+        if rc != 0:
+            logger.warning(f"Unexpected MQTT disconnection with code {rc}. Will auto-reconnect.")
+        else:
+            logger.info("MQTT client disconnected cleanly")
+    
+    client.on_disconnect = on_disconnect
     
     if config.get('mqtt_username') and config.get('mqtt_password'):
         client.username_pw_set(config['mqtt_username'], config['mqtt_password'])
@@ -1508,6 +1921,29 @@ def start_mqtt_listener(max_retries=10):
             
             # Immediately publish online status
             client.publish(will_topic, "online", qos=1, retain=True)
+            
+            # Add a periodic ping to verify connection is still alive
+            def maintain_connection():
+                """Periodic function to maintain connection and verify it's working"""
+                while True:
+                    try:
+                        time.sleep(60)  # Check connection every minute
+                        if not client.is_connected():
+                            logger.warning("MQTT connection lost, reconnecting...")
+                            try:
+                                client.reconnect()
+                                logger.info("MQTT reconnection successful")
+                            except Exception as reconnect_error:
+                                logger.error(f"Failed to reconnect: {reconnect_error}")
+                        else:
+                            # Send a ping by publishing to a debug topic periodically
+                            client.publish(f"{topic_prefix}/availability", "online", qos=1, retain=True)
+                    except Exception as e:
+                        logger.error(f"Error in connection maintenance thread: {e}")
+            
+            # Start connection maintenance in a background thread
+            connection_thread = threading.Thread(target=maintain_connection, daemon=True)
+            connection_thread.start()
             
             return client
         except Exception as e:
@@ -1681,6 +2117,40 @@ def register_with_ha():
         "origin": origin_info
     }
     
+    # Register CPU frequency sensor
+    cpu_frequency_config = {
+        "device": device_info,
+        "name": f"RetroPie {device_name} CPU Frequency",
+        "unique_id": f"retropie_{safe_device_name}_cpu_freq",
+        "object_id": f"retropie_{safe_device_name}_cpu_freq",
+        "state_topic": f"{topic_prefix}/status",
+        "value_template": "{{ value_json.system_info.cpu_freq }}",
+        "unit_of_measurement": "MHz",
+        "icon": "mdi:sine-wave",
+        "state_class": "measurement",
+        "availability": availability,
+        "availability_mode": "all",
+        "enabled_by_default": True,
+        "origin": origin_info
+    }
+    
+    # Register GPU frequency sensor
+    gpu_frequency_config = {
+        "device": device_info,
+        "name": f"RetroPie {device_name} GPU Frequency",
+        "unique_id": f"retropie_{safe_device_name}_gpu_freq",
+        "object_id": f"retropie_{safe_device_name}_gpu_freq",
+        "state_topic": f"{topic_prefix}/status",
+        "value_template": "{{ value_json.system_info.gpu_freq }}",
+        "unit_of_measurement": "MHz",
+        "icon": "mdi:video",
+        "state_class": "measurement",
+        "availability": availability,
+        "availability_mode": "all",
+        "enabled_by_default": True,
+        "origin": origin_info
+    }
+    
     # Register TTS input text entity
     tts_input_config = {
         "device": device_info,
@@ -1793,6 +2263,24 @@ def register_with_ha():
             retain=True
         )
         logger.info(f"Published CPU load sensor config")
+        
+        # Publish CPU frequency sensor
+        client.publish(
+            f"homeassistant/sensor/retropie_{safe_device_name}/cpu_freq/config",
+            json.dumps(cpu_frequency_config),
+            qos=1,
+            retain=True
+        )
+        logger.info(f"Published CPU frequency sensor config")
+        
+        # Publish GPU frequency sensor
+        client.publish(
+            f"homeassistant/sensor/retropie_{safe_device_name}/gpu_freq/config",
+            json.dumps(gpu_frequency_config),
+            qos=1,
+            retain=True
+        )
+        logger.info(f"Published GPU frequency sensor config")
         
         # Register total games sensor
         total_games_config = {
@@ -2078,6 +2566,7 @@ if __name__ == '__main__':
     parser.add_argument('--register', action='store_true', help='Register with Home Assistant')
     parser.add_argument('--tts', help='Text to speak')
     parser.add_argument('--listen', action='store_true', help='Start MQTT listener for commands')
+    parser.add_argument('--shutdown-mode', action='store_true', help='Use reduced timeouts for shutdown operations')
     parser.add_argument('args', nargs='*', help='Event arguments')
     
     args = parser.parse_args()
@@ -2131,6 +2620,9 @@ if __name__ == '__main__':
         sys.exit(0)
     
     if args.event:
+        # For quit events, if shutdown_mode is specified, pass it to ensure lower timeouts
+        if args.event == 'quit' and args.shutdown_mode:
+            logger.info("Running quit event in shutdown mode")
         publish_game_event(args.event, args.args)
         sys.exit(0)
     

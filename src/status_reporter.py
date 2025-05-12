@@ -45,8 +45,19 @@ def remove_pid():
 def signal_handler(sig, frame):
     """Handle signals to clean up"""
     logger.info("Received signal to terminate")
-    # Send system shutdown event when shutting down
-    subprocess.run(['python3', MQTT_CLIENT, '--event', 'quit'])
+    # Send system shutdown event when shutting down with a short timeout
+    try:
+        # Set a very short timeout for shutdown operations (3 seconds)
+        subprocess.run(['python3', MQTT_CLIENT, '--event', 'quit', '--shutdown-mode'], 
+                      timeout=3, 
+                      stdout=subprocess.DEVNULL, 
+                      stderr=subprocess.DEVNULL)
+    except subprocess.TimeoutExpired:
+        logger.warning("MQTT shutdown command timed out - network may be unavailable")
+    except Exception as e:
+        logger.error(f"Error during shutdown notification: {e}")
+    
+    # Always clean up and exit, even if the MQTT notification fails
     remove_pid()
     sys.exit(0)
 

@@ -39,6 +39,10 @@ entities:
     name: CPU Temperature
   - entity: sensor.retropie_arcade_gpu_temperature
     name: GPU Temperature
+  - entity: sensor.retropie_arcade_cpu_freq
+    name: CPU Frequency
+  - entity: sensor.retropie_arcade_gpu_freq
+    name: GPU Frequency
   - entity: sensor.retropie_arcade_game_status
     name: Current Game
 ```
@@ -50,15 +54,40 @@ For a more advanced card with game information display:
 ```yaml
 type: vertical-stack
 cards:
-  - type: gauge
-    entity: sensor.retropie_arcade_cpu_temperature
-    name: CPU Temperature
-    min: 30
-    max: 85
-    severity:
-      green: 30
-      yellow: 65
-      red: 75
+  - type: horizontal-stack
+    cards:
+      - type: gauge
+        entity: sensor.retropie_arcade_cpu_temperature
+        name: CPU Temperature
+        min: 30
+        max: 85
+        severity:
+          green: 30
+          yellow: 65
+          red: 75
+      - type: gauge
+        entity: sensor.retropie_arcade_cpu_freq
+        name: CPU Frequency
+        min: 500
+        max: 2000
+        unit: MHz
+  - type: horizontal-stack
+    cards:
+      - type: gauge
+        entity: sensor.retropie_arcade_gpu_temperature
+        name: GPU Temperature
+        min: 30
+        max: 85
+        severity:
+          green: 30
+          yellow: 65
+          red: 75
+      - type: gauge
+        entity: sensor.retropie_arcade_gpu_freq
+        name: GPU Frequency
+        min: 100
+        max: 700
+        unit: MHz
   - type: conditional
     conditions:
       - entity: sensor.retropie_arcade_game_status

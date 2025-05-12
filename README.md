@@ -117,6 +117,8 @@ The integration creates the following entities in Home Assistant:
 - **Favorite Games** - Shows the number of games marked as favorites
 - **Kid-Friendly Games** - Shows the number of games suitable for children
 - **CPU Temperature** - Shows the current CPU temperature
+- **CPU Frequency** - Shows the current CPU frequency in MHz
+- **GPU Frequency** - Shows the current GPU frequency in MHz
 - **Memory Usage** - Shows the current memory usage as a percentage
 - **CPU Load** - Shows the current CPU load
 
