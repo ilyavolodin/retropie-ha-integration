@@ -6,19 +6,34 @@ import json
 import signal
 import sys
 import logging
+import platform
+
+# Detect system type
+SYSTEM_TYPE = "unknown"
+if os.path.exists("/opt/retropie"):
+    SYSTEM_TYPE = "retropie"
+    CONFIG_DIR = os.path.expanduser('~/.config/retropie-ha')
+    SYSTEM_NAME = "retropie"
+elif os.path.exists("/userdata/system"):
+    SYSTEM_TYPE = "batocera"
+    CONFIG_DIR = "/userdata/system/retropie-ha"
+    SYSTEM_NAME = "batocera"
+else:
+    # Fallback to RetroPie defaults
+    CONFIG_DIR = os.path.expanduser('~/.config/retropie-ha')
+    SYSTEM_NAME = "retropie"
 
 # Set up logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler(os.path.expanduser('~/.config/retropie-ha/retropie-ha.log'))
+        logging.FileHandler(os.path.join(CONFIG_DIR, 'retropie-ha.log'))
         # Removed StreamHandler to prevent console output
     ]
 )
-logger = logging.getLogger('retropie-ha-status')
+logger = logging.getLogger(f'{SYSTEM_NAME}-ha-status')
 
-CONFIG_DIR = os.path.expanduser('~/.config/retropie-ha')
 CONFIG_FILE = os.path.join(CONFIG_DIR, 'config.json')
 PID_FILE = os.path.join(CONFIG_DIR, 'reporter.pid')
 MQTT_CLIENT = os.path.join(CONFIG_DIR, 'mqtt_client.py')

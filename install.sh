@@ -1,16 +1,43 @@
 #!/bin/bash
-# Installation script for RetroPie Home Assistant Integration
+# Installation script for RetroPie/Batocera Home Assistant Integration
 
 set -e
 
-# Configuration
-CONFIG_DIR="$HOME/.config/retropie-ha"
-ES_SCRIPTS_DIR="$HOME/.emulationstation/scripts"
-RC_SCRIPTS_DIR="/opt/retropie/configs/all"
+# Detect system type: RetroPie or Batocera
+SYSTEM_TYPE="unknown"
+if [ -d "/opt/retropie" ]; then
+    SYSTEM_TYPE="retropie"
+    echo "Detected system: RetroPie"
+elif [ -d "/userdata/system" ]; then
+    SYSTEM_TYPE="batocera"
+    echo "Detected system: Batocera"
+else
+    echo "Unknown system type. This script requires either RetroPie or Batocera."
+    echo "Installation will continue but may not work correctly."
+fi
+
+# Configuration based on system type
+if [ "$SYSTEM_TYPE" = "retropie" ]; then
+    CONFIG_DIR="$HOME/.config/retropie-ha"
+    ES_SCRIPTS_DIR="$HOME/.emulationstation/scripts"
+    RC_SCRIPTS_DIR="/opt/retropie/configs/all"
+    SYSTEM_NAME="retropie"
+elif [ "$SYSTEM_TYPE" = "batocera" ]; then
+    CONFIG_DIR="/userdata/system/retropie-ha"
+    ES_SCRIPTS_DIR="/userdata/system/configs/emulationstation/scripts"
+    RC_SCRIPTS_DIR="/userdata/system/configs/emulationstation"
+    SYSTEM_NAME="batocera"
+else
+    # Fallback to RetroPie defaults
+    CONFIG_DIR="$HOME/.config/retropie-ha"
+    ES_SCRIPTS_DIR="$HOME/.emulationstation/scripts"
+    RC_SCRIPTS_DIR="/opt/retropie/configs/all"
+    SYSTEM_NAME="retropie"
+fi
 
 # Display banner
 echo "============================================="
-echo "  RetroPie Home Assistant Integration Setup  "
+echo "  ${SYSTEM_NAME^} Home Assistant Integration Setup  "
 echo "============================================="
 echo ""
 
@@ -94,8 +121,8 @@ else
         echo ""
     fi
     
-    read -p "MQTT Topic Prefix [retropie/arcade]: " MQTT_TOPIC_PREFIX
-    MQTT_TOPIC_PREFIX=${MQTT_TOPIC_PREFIX:-retropie/arcade}
+    read -p "MQTT Topic Prefix [${SYSTEM_NAME}/${DEVICE_NAME}]: " MQTT_TOPIC_PREFIX
+    MQTT_TOPIC_PREFIX=${MQTT_TOPIC_PREFIX:-${SYSTEM_NAME}/arcade}
     
     read -p "Device Name [arcade]: " DEVICE_NAME
     DEVICE_NAME=${DEVICE_NAME:-arcade}
@@ -207,7 +234,10 @@ chmod +x "$RC_SCRIPTS_DIR/runcommand-onstart/"* "$RC_SCRIPTS_DIR/runcommand-onen
 
 # Create RunCommand hooks
 echo "Creating RunCommand hooks..."
-cat > "$RC_SCRIPTS_DIR/runcommand-onstart.sh" << 'EOF'
+
+if [ "$SYSTEM_TYPE" = "retropie" ]; then
+    # RetroPie hooks
+    cat > "$RC_SCRIPTS_DIR/runcommand-onstart.sh" << 'EOF'
 #!/bin/bash
 # Log the event
 echo "[$(date)] RunCommand OnStart: $@" >> /tmp/retropie_events.log
@@ -215,7 +245,7 @@ echo "[$(date)] RunCommand OnStart: $@" >> /tmp/retropie_events.log
 /opt/retropie/configs/all/runcommand-onstart/01_report_game_start.sh "$@"
 EOF
 
-cat > "$RC_SCRIPTS_DIR/runcommand-onend.sh" << 'EOF'
+    cat > "$RC_SCRIPTS_DIR/runcommand-onend.sh" << 'EOF'
 #!/bin/bash
 # Log the event
 echo "[$(date)] RunCommand OnEnd: $@" >> /tmp/retropie_events.log
@@ -223,8 +253,32 @@ echo "[$(date)] RunCommand OnEnd: $@" >> /tmp/retropie_events.log
 /opt/retropie/configs/all/runcommand-onend/01_report_game_end.sh "$@"
 EOF
 
-# Set permissions for RunCommand hooks
-chmod +x "$RC_SCRIPTS_DIR/runcommand-onstart.sh" "$RC_SCRIPTS_DIR/runcommand-onend.sh"
+    # Set permissions for RunCommand hooks
+    chmod +x "$RC_SCRIPTS_DIR/runcommand-onstart.sh" "$RC_SCRIPTS_DIR/runcommand-onend.sh"
+
+elif [ "$SYSTEM_TYPE" = "batocera" ]; then
+    # Batocera hooks - creating custom scripts for launch and exit
+    mkdir -p "$RC_SCRIPTS_DIR/custom.pre.sh.d" "$RC_SCRIPTS_DIR/custom.sh.d"
+    
+    cat > "$RC_SCRIPTS_DIR/custom.pre.sh.d/01_report_game_start.sh" << 'EOF'
+#!/bin/bash
+# Log the event
+echo "[$(date)] Batocera Game Start: $@" >> /tmp/batocera_events.log
+# Call the report script
+"$ES_SCRIPTS_DIR/game-start/01_report_game_start.sh" "$@"
+EOF
+
+    cat > "$RC_SCRIPTS_DIR/custom.sh.d/99_report_game_end.sh" << 'EOF'
+#!/bin/bash
+# Log the event
+echo "[$(date)] Batocera Game End: $@" >> /tmp/batocera_events.log
+# Call the report script
+"$ES_SCRIPTS_DIR/game-end/01_report_game_end.sh" "$@"
+EOF
+
+    # Set permissions for Batocera hooks
+    chmod +x "$RC_SCRIPTS_DIR/custom.pre.sh.d/01_report_game_start.sh" "$RC_SCRIPTS_DIR/custom.sh.d/99_report_game_end.sh"
+fi
 
 # Fix EmulationStation audio mixer issue
 echo "Fixing EmulationStation audio mixer issue..."
@@ -244,10 +298,21 @@ echo "Creating systemd service..."
 CURRENT_USER=$(whoami)
 HOME_DIR=$(eval echo ~$CURRENT_USER)
 
+if [ "$SYSTEM_TYPE" = "retropie" ]; then
+    SERVICE_NAME="retropie-ha.service"
+    SERVICE_DESC="RetroPie Home Assistant Integration"
+elif [ "$SYSTEM_TYPE" = "batocera" ]; then
+    SERVICE_NAME="batocera-ha.service"
+    SERVICE_DESC="Batocera Home Assistant Integration"
+else
+    SERVICE_NAME="retropie-ha.service" # fallback
+    SERVICE_DESC="Home Assistant Integration"
+fi
+
 # Create service file with correct paths
-cat > /tmp/retropie-ha.service << EOF
+cat > /tmp/${SERVICE_NAME} << EOF
 [Unit]
-Description=RetroPie Home Assistant Integration
+Description=${SERVICE_DESC}
 After=network-online.target
 Wants=network-online.target
 # Make sure to wait for network to be fully ready
@@ -272,70 +337,80 @@ EOF
 
 # Install service
 echo "Installing systemd service..."
-sudo mv /tmp/retropie-ha.service /etc/systemd/system/
+if [ "$SYSTEM_TYPE" = "batocera" ]; then
+    # In Batocera, services go in /userdata/system/services/
+    mkdir -p /userdata/system/services/
+    sudo mv /tmp/${SERVICE_NAME} /userdata/system/services/
+    # Enable at startup by creating a link in /etc/systemd/system/
+    sudo ln -sf /userdata/system/services/${SERVICE_NAME} /etc/systemd/system/
+else
+    # Standard location for RetroPie
+    sudo mv /tmp/${SERVICE_NAME} /etc/systemd/system/
+fi
+
 sudo systemctl daemon-reload
-sudo systemctl enable retropie-ha.service
+sudo systemctl enable ${SERVICE_NAME}
 
 # Delete any existing configurations in Home Assistant
 echo "Cleaning up old Home Assistant configurations..."
 # Safely remove old discovery configurations to avoid duplicates
 if [ -n "$MQTT_USERNAME" ]; then
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/sensor/retropie_${DEVICE_NAME// /_}/cpu_temp/config" -n -r -d
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/sensor/retropie_${DEVICE_NAME// /_}/gpu_temp/config" -n -r -d
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/sensor/retropie_${DEVICE_NAME// /_}/game_status/config" -n -r -d
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/sensor/retropie_${DEVICE_NAME// /_}/memory_usage/config" -n -r -d
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/sensor/retropie_${DEVICE_NAME// /_}/cpu_load/config" -n -r -d
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/sensor/retropie_${DEVICE_NAME// /_}/machine_status/config" -n -r -d
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/sensor/retropie_${DEVICE_NAME// /_}/play_duration/config" -n -r -d
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/sensor/${SYSTEM_NAME}_${DEVICE_NAME// /_}/cpu_temp/config" -n -r -d
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/sensor/${SYSTEM_NAME}_${DEVICE_NAME// /_}/gpu_temp/config" -n -r -d
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/sensor/${SYSTEM_NAME}_${DEVICE_NAME// /_}/game_status/config" -n -r -d
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/sensor/${SYSTEM_NAME}_${DEVICE_NAME// /_}/memory_usage/config" -n -r -d
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/sensor/${SYSTEM_NAME}_${DEVICE_NAME// /_}/cpu_load/config" -n -r -d
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/sensor/${SYSTEM_NAME}_${DEVICE_NAME// /_}/machine_status/config" -n -r -d
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/sensor/${SYSTEM_NAME}_${DEVICE_NAME// /_}/play_duration/config" -n -r -d
     # Clear old device automation entities
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/device_automation/retropie_${DEVICE_NAME// /_}/tts/config" -n -r -d
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/device_automation/retropie_${DEVICE_NAME// /_}/retroarch_message/config" -n -r -d
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/device_automation/retropie_${DEVICE_NAME// /_}/retroarch_command/config" -n -r -d
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/device_automation/retropie_${DEVICE_NAME// /_}/retroarch_status/config" -n -r -d
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/device_automation/retropie_${DEVICE_NAME// /_}/ui_mode/config" -n -r -d
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/device_automation/retropie_${DEVICE_NAME// /_}/scan_games/config" -n -r -d
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/device_automation/${SYSTEM_NAME}_${DEVICE_NAME// /_}/tts/config" -n -r -d
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/device_automation/${SYSTEM_NAME}_${DEVICE_NAME// /_}/retroarch_message/config" -n -r -d
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/device_automation/${SYSTEM_NAME}_${DEVICE_NAME// /_}/retroarch_command/config" -n -r -d
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/device_automation/${SYSTEM_NAME}_${DEVICE_NAME// /_}/retroarch_status/config" -n -r -d
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/device_automation/${SYSTEM_NAME}_${DEVICE_NAME// /_}/ui_mode/config" -n -r -d
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/device_automation/${SYSTEM_NAME}_${DEVICE_NAME// /_}/scan_games/config" -n -r -d
     
     # Clear new entities
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/text/retropie_${DEVICE_NAME// /_}/tts_text/config" -n -r -d
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/button/retropie_${DEVICE_NAME// /_}/tts_speak/config" -n -r -d
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/text/retropie_${DEVICE_NAME// /_}/retroarch_message_text/config" -n -r -d
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/button/retropie_${DEVICE_NAME// /_}/retroarch_display_message/config" -n -r -d
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/text/retropie_${DEVICE_NAME// /_}/retroarch_command_text/config" -n -r -d
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/button/retropie_${DEVICE_NAME// /_}/retroarch_execute_command/config" -n -r -d
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/button/retropie_${DEVICE_NAME// /_}/retroarch_get_status/config" -n -r -d
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/select/retropie_${DEVICE_NAME// /_}/ui_mode/config" -n -r -d
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/button/retropie_${DEVICE_NAME// /_}/scan_games/config" -n -r -d
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/sensor/retropie_${DEVICE_NAME// /_}/total_games/config" -n -r -d
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/sensor/retropie_${DEVICE_NAME// /_}/favorites/config" -n -r -d
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/sensor/retropie_${DEVICE_NAME// /_}/kid_friendly/config" -n -r -d
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/text/${SYSTEM_NAME}_${DEVICE_NAME// /_}/tts_text/config" -n -r -d
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/button/${SYSTEM_NAME}_${DEVICE_NAME// /_}/tts_speak/config" -n -r -d
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/text/${SYSTEM_NAME}_${DEVICE_NAME// /_}/retroarch_message_text/config" -n -r -d
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/button/${SYSTEM_NAME}_${DEVICE_NAME// /_}/retroarch_display_message/config" -n -r -d
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/text/${SYSTEM_NAME}_${DEVICE_NAME// /_}/retroarch_command_text/config" -n -r -d
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/button/${SYSTEM_NAME}_${DEVICE_NAME// /_}/retroarch_execute_command/config" -n -r -d
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/button/${SYSTEM_NAME}_${DEVICE_NAME// /_}/retroarch_get_status/config" -n -r -d
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/select/${SYSTEM_NAME}_${DEVICE_NAME// /_}/ui_mode/config" -n -r -d
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/button/${SYSTEM_NAME}_${DEVICE_NAME// /_}/scan_games/config" -n -r -d
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/sensor/${SYSTEM_NAME}_${DEVICE_NAME// /_}/total_games/config" -n -r -d
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/sensor/${SYSTEM_NAME}_${DEVICE_NAME// /_}/favorites/config" -n -r -d
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/sensor/${SYSTEM_NAME}_${DEVICE_NAME// /_}/kid_friendly/config" -n -r -d
 else
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/sensor/retropie_${DEVICE_NAME// /_}/cpu_temp/config" -n -r -d
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/sensor/retropie_${DEVICE_NAME// /_}/gpu_temp/config" -n -r -d
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/sensor/retropie_${DEVICE_NAME// /_}/game_status/config" -n -r -d
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/sensor/retropie_${DEVICE_NAME// /_}/memory_usage/config" -n -r -d
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/sensor/retropie_${DEVICE_NAME// /_}/cpu_load/config" -n -r -d
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/sensor/retropie_${DEVICE_NAME// /_}/machine_status/config" -n -r -d
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/sensor/retropie_${DEVICE_NAME// /_}/play_duration/config" -n -r -d
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/device_automation/retropie_${DEVICE_NAME// /_}/tts/config" -n -r -d
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/device_automation/retropie_${DEVICE_NAME// /_}/retroarch_message/config" -n -r -d
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/device_automation/retropie_${DEVICE_NAME// /_}/retroarch_command/config" -n -r -d
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/device_automation/retropie_${DEVICE_NAME// /_}/retroarch_status/config" -n -r -d
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/device_automation/retropie_${DEVICE_NAME// /_}/ui_mode/config" -n -r -d
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/device_automation/retropie_${DEVICE_NAME// /_}/scan_games/config" -n -r -d
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/sensor/${SYSTEM_NAME}_${DEVICE_NAME// /_}/cpu_temp/config" -n -r -d
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/sensor/${SYSTEM_NAME}_${DEVICE_NAME// /_}/gpu_temp/config" -n -r -d
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/sensor/${SYSTEM_NAME}_${DEVICE_NAME// /_}/game_status/config" -n -r -d
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/sensor/${SYSTEM_NAME}_${DEVICE_NAME// /_}/memory_usage/config" -n -r -d
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/sensor/${SYSTEM_NAME}_${DEVICE_NAME// /_}/cpu_load/config" -n -r -d
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/sensor/${SYSTEM_NAME}_${DEVICE_NAME// /_}/machine_status/config" -n -r -d
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/sensor/${SYSTEM_NAME}_${DEVICE_NAME// /_}/play_duration/config" -n -r -d
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/device_automation/${SYSTEM_NAME}_${DEVICE_NAME// /_}/tts/config" -n -r -d
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/device_automation/${SYSTEM_NAME}_${DEVICE_NAME// /_}/retroarch_message/config" -n -r -d
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/device_automation/${SYSTEM_NAME}_${DEVICE_NAME// /_}/retroarch_command/config" -n -r -d
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/device_automation/${SYSTEM_NAME}_${DEVICE_NAME// /_}/retroarch_status/config" -n -r -d
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/device_automation/${SYSTEM_NAME}_${DEVICE_NAME// /_}/ui_mode/config" -n -r -d
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/device_automation/${SYSTEM_NAME}_${DEVICE_NAME// /_}/scan_games/config" -n -r -d
     
     # Clear new entities
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/text/retropie_${DEVICE_NAME// /_}/tts_text/config" -n -r -d
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/button/retropie_${DEVICE_NAME// /_}/tts_speak/config" -n -r -d
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/text/retropie_${DEVICE_NAME// /_}/retroarch_message_text/config" -n -r -d
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/button/retropie_${DEVICE_NAME// /_}/retroarch_display_message/config" -n -r -d
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/text/retropie_${DEVICE_NAME// /_}/retroarch_command_text/config" -n -r -d
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/button/retropie_${DEVICE_NAME// /_}/retroarch_execute_command/config" -n -r -d
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/button/retropie_${DEVICE_NAME// /_}/retroarch_get_status/config" -n -r -d
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/select/retropie_${DEVICE_NAME// /_}/ui_mode/config" -n -r -d
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/button/retropie_${DEVICE_NAME// /_}/scan_games/config" -n -r -d
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/sensor/retropie_${DEVICE_NAME// /_}/total_games/config" -n -r -d
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/sensor/retropie_${DEVICE_NAME// /_}/favorites/config" -n -r -d
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/sensor/retropie_${DEVICE_NAME// /_}/kid_friendly/config" -n -r -d
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/text/${SYSTEM_NAME}_${DEVICE_NAME// /_}/tts_text/config" -n -r -d
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/button/${SYSTEM_NAME}_${DEVICE_NAME// /_}/tts_speak/config" -n -r -d
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/text/${SYSTEM_NAME}_${DEVICE_NAME// /_}/retroarch_message_text/config" -n -r -d
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/button/${SYSTEM_NAME}_${DEVICE_NAME// /_}/retroarch_display_message/config" -n -r -d
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/text/${SYSTEM_NAME}_${DEVICE_NAME// /_}/retroarch_command_text/config" -n -r -d
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/button/${SYSTEM_NAME}_${DEVICE_NAME// /_}/retroarch_execute_command/config" -n -r -d
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/button/${SYSTEM_NAME}_${DEVICE_NAME// /_}/retroarch_get_status/config" -n -r -d
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/select/${SYSTEM_NAME}_${DEVICE_NAME// /_}/ui_mode/config" -n -r -d
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/button/${SYSTEM_NAME}_${DEVICE_NAME// /_}/scan_games/config" -n -r -d
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/sensor/${SYSTEM_NAME}_${DEVICE_NAME// /_}/total_games/config" -n -r -d
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/sensor/${SYSTEM_NAME}_${DEVICE_NAME// /_}/favorites/config" -n -r -d
+    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/sensor/${SYSTEM_NAME}_${DEVICE_NAME// /_}/kid_friendly/config" -n -r -d
 fi
 
 # Test audio for text-to-speech
@@ -365,26 +440,26 @@ EOF
 fi
 
 # Start the service
-sudo systemctl start retropie-ha.service
+sudo systemctl start ${SERVICE_NAME}
 
 # Verify installation
 echo "Verifying installation..."
 sleep 2
-if systemctl is-active --quiet retropie-ha.service; then
+if systemctl is-active --quiet ${SERVICE_NAME}; then
     echo "Service is running correctly."
 else
-    echo "Service failed to start. Check logs with: sudo journalctl -u retropie-ha.service"
+    echo "Service failed to start. Check logs with: sudo journalctl -u ${SERVICE_NAME}"
 fi
 
 echo ""
 echo "Installation completed successfully!"
-echo "The RetroPie Home Assistant Integration is now running."
+echo "The ${SYSTEM_NAME^} Home Assistant Integration is now running."
 echo ""
-echo "To check status: sudo systemctl status retropie-ha.service"
-echo "To view logs: sudo journalctl -u retropie-ha.service"
+echo "To check status: sudo systemctl status ${SERVICE_NAME}"
+echo "To view logs: sudo journalctl -u ${SERVICE_NAME}"
 echo "To view integration logs: cat $CONFIG_DIR/retropie-ha.log"
 echo ""
-echo "Your RetroPie will now report events and status to Home Assistant via MQTT."
+echo "Your ${SYSTEM_NAME^} will now report events and status to Home Assistant via MQTT."
 echo "Home Assistant should auto-discover the sensors if MQTT integration is configured."
 echo ""
 echo "New features:"

@@ -25,21 +25,37 @@ except ImportError:
     # Don't log here, since logger isn't initialized yet
     # We'll log this later
 
+# Detect system type
+SYSTEM_TYPE = "unknown"
+if os.path.exists("/opt/retropie"):
+    SYSTEM_TYPE = "retropie"
+    CONFIG_DIR = os.path.expanduser('~/.config/retropie-ha')
+    ROMS_DIR = os.path.expanduser('~/RetroPie/roms')
+    SYSTEM_NAME = "retropie"
+elif os.path.exists("/userdata/system"):
+    SYSTEM_TYPE = "batocera"
+    CONFIG_DIR = "/userdata/system/retropie-ha"
+    ROMS_DIR = "/userdata/roms"
+    SYSTEM_NAME = "batocera"
+else:
+    # Fallback to RetroPie defaults
+    CONFIG_DIR = os.path.expanduser('~/.config/retropie-ha')
+    ROMS_DIR = os.path.expanduser('~/RetroPie/roms')
+    SYSTEM_NAME = "retropie"
+
 # Set up logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler(os.path.expanduser('~/.config/retropie-ha/retropie-ha.log'))
+        logging.FileHandler(os.path.join(CONFIG_DIR, 'retropie-ha.log'))
         # Removed StreamHandler to prevent console output
     ]
 )
-logger = logging.getLogger('retropie-ha')
+logger = logging.getLogger(f'{SYSTEM_NAME}-ha')
 
 # Constants
-CONFIG_DIR = os.path.expanduser('~/.config/retropie-ha')
 CONFIG_FILE = os.path.join(CONFIG_DIR, 'config.json')
-ROMS_DIR = os.path.expanduser('~/RetroPie/roms')
 STATE_FILE = os.path.join(CONFIG_DIR, 'state.json')
 RETROARCH_PORT = 55355  # Default RetroArch Network Control Interface port
 
@@ -206,10 +222,30 @@ def get_game_metadata(system, rom_path):
         if rom_path.startswith('./'):
             rom_path = rom_path[2:]  # Remove ./ prefix
         
-        # Find the gamelist.xml file
-        gamelist_path = os.path.join(ROMS_DIR, system, 'gamelist.xml')
-        if not os.path.exists(gamelist_path):
-            logger.warning(f"gamelist.xml not found for system {system}")
+        # Find the gamelist.xml file - check multiple possible locations based on system type
+        gamelist_paths = []
+        
+        # First try system-specific ROM directory (primary location)
+        gamelist_paths.append(os.path.join(ROMS_DIR, system, 'gamelist.xml'))
+        
+        # For Batocera, also check alternative locations
+        if SYSTEM_TYPE == "batocera":
+            # Batocera can have gamelist.xml files in multiple locations
+            gamelist_paths.append(f"/userdata/system/configs/emulationstation/gamelists/{system}/gamelist.xml")
+        
+        # For RetroPie, check alternative location
+        elif SYSTEM_TYPE == "retropie":
+            gamelist_paths.append(os.path.expanduser(f"~/.emulationstation/gamelists/{system}/gamelist.xml"))
+        
+        # Try each path until we find an existing file
+        gamelist_path = None
+        for path in gamelist_paths:
+            if os.path.exists(path):
+                gamelist_path = path
+                break
+        
+        if not gamelist_path:
+            logger.warning(f"gamelist.xml not found for system {system} in any of the expected locations")
             return {}
         
         # Parse the gamelist.xml
@@ -296,9 +332,8 @@ def publish_mqtt_message(topic, message, retain=False, max_retries=5, shutdown_m
         except Exception as e:
             logger.warning(f"Network check failed during shutdown: {e}")
             return False
-    
-    # Use a unique client id to avoid connection conflicts
-    client_id = f"retropie-publisher-{int(time.time())}-{os.getpid()}"
+      # Use a unique client id to avoid connection conflicts
+    client_id = f"{SYSTEM_NAME}-publisher-{int(time.time())}-{os.getpid()}"
     client = mqtt.Client(client_id=client_id)
     
     # Set up a connection callback to track successful connections
@@ -413,7 +448,7 @@ def publish_game_event(event_type, event_args=None):
         logger.info("Processing quit event in shutdown mode with reduced timeouts")
     
     config = get_config()
-    topic_prefix = config.get('mqtt_topic_prefix', 'retropie')
+    topic_prefix = config.get('mqtt_topic_prefix', SYSTEM_NAME)
     device_name = config.get('device_name', socket.gethostname())
     
     payload = {
@@ -585,7 +620,7 @@ def publish_state_message(state_topic, state_value, retain=True, shutdown_mode=F
 def publish_machine_status():
     """Publish machine status to MQTT"""
     config = get_config()
-    topic_prefix = config.get('mqtt_topic_prefix', 'retropie')
+    topic_prefix = config.get('mqtt_topic_prefix', SYSTEM_NAME)
     
     # Create the status payload
     payload = {
@@ -606,7 +641,7 @@ def publish_machine_status():
 def publish_system_status():
     """Publish system status information to MQTT"""
     config = get_config()
-    topic_prefix = config.get('mqtt_topic_prefix', 'retropie')
+    topic_prefix = config.get('mqtt_topic_prefix', SYSTEM_NAME)
     device_name = config.get('device_name', socket.gethostname())
     
     payload = {
@@ -628,7 +663,7 @@ def on_connect(client, userdata, flags, rc):
     logger.info(f"Connected to MQTT broker with result code {rc}")
     
     # Get topic prefix from config
-    topic_prefix = get_config().get('mqtt_topic_prefix', 'retropie')
+    topic_prefix = get_config().get('mqtt_topic_prefix', SYSTEM_NAME)
     
     # Subscribe to all command topics
     command_topics = [
@@ -664,7 +699,7 @@ def on_message(client, userdata, msg):
         
         # Check the message topic to determine the action
         config = get_config()
-        topic_prefix = config.get('mqtt_topic_prefix', 'retropie')
+        topic_prefix = config.get('mqtt_topic_prefix', SYSTEM_NAME)
         
         # Debug topic for testing connection
         if msg.topic == f"{topic_prefix}/debug":
@@ -1317,16 +1352,46 @@ def start_file_monitoring():
         file_observer = Observer()
         file_observer.daemon = True  # Make sure observer thread exits when main thread exits
         
-        # Schedule monitoring for each system directory
+        # Monitor locations based on system type
+        paths_to_monitor = []
+        
+        # Always monitor the ROMs directory for all systems
         if os.path.exists(ROMS_DIR):
-            # Schedule the main ROMS_DIR
-            file_observer.schedule(event_handler, ROMS_DIR, recursive=False)
+            paths_to_monitor.append(ROMS_DIR)
             
-            # Schedule each system directory
+            # Add each system subdirectory
             for system_dir in os.listdir(ROMS_DIR):
                 system_path = os.path.join(ROMS_DIR, system_dir)
                 if os.path.isdir(system_path):
-                    file_observer.schedule(event_handler, system_path, recursive=False)
+                    paths_to_monitor.append(system_path)
+        
+        # For Batocera, also monitor the ES configs directory
+        if SYSTEM_TYPE == "batocera" and os.path.exists("/userdata/system/configs/emulationstation/gamelists"):
+            paths_to_monitor.append("/userdata/system/configs/emulationstation/gamelists")
+            
+            # Add each system's gamelist directory
+            es_gamelists = "/userdata/system/configs/emulationstation/gamelists"
+            if os.path.exists(es_gamelists):
+                for system_dir in os.listdir(es_gamelists):
+                    system_path = os.path.join(es_gamelists, system_dir)
+                    if os.path.isdir(system_path):
+                        paths_to_monitor.append(system_path)
+        
+        # For RetroPie, monitor the ES gamelists directory
+        elif SYSTEM_TYPE == "retropie":
+            es_gamelists = os.path.expanduser("~/.emulationstation/gamelists")
+            if os.path.exists(es_gamelists):
+                paths_to_monitor.append(es_gamelists)
+                
+                # Add each system's gamelist directory
+                for system_dir in os.listdir(es_gamelists):
+                    system_path = os.path.join(es_gamelists, system_dir)
+                    if os.path.isdir(system_path):
+                        paths_to_monitor.append(system_path)
+        
+        # Schedule monitoring for all identified paths
+        for path in paths_to_monitor:
+            file_observer.schedule(event_handler, path, recursive=False)
         
         # Start the observer
         file_observer.start()
@@ -1376,14 +1441,33 @@ def _scan_game_collection_thread():
         # Scan each system directory in the ROMS_DIR
         for system_dir in os.listdir(ROMS_DIR):
             system_path = os.path.join(ROMS_DIR, system_dir)
-            
-            # Skip if not a directory
+              # Skip if not a directory
             if not os.path.isdir(system_path):
                 continue
             
-            # Look for gamelist.xml
-            gamelist_path = os.path.join(system_path, 'gamelist.xml')
-            if not os.path.exists(gamelist_path):
+            # Look for gamelist.xml - check multiple possible locations
+            gamelist_paths = []
+            
+            # First try system-specific ROM directory (primary location)
+            gamelist_paths.append(os.path.join(system_path, 'gamelist.xml'))
+            
+            # For Batocera, also check alternative locations
+            if SYSTEM_TYPE == "batocera":
+                # Batocera can have gamelist.xml files in multiple locations
+                gamelist_paths.append(f"/userdata/system/configs/emulationstation/gamelists/{system_dir}/gamelist.xml")
+            
+            # For RetroPie, check alternative location
+            elif SYSTEM_TYPE == "retropie":
+                gamelist_paths.append(os.path.expanduser(f"~/.emulationstation/gamelists/{system_dir}/gamelist.xml"))
+            
+            # Try each path until we find an existing file
+            gamelist_path = None
+            for path in gamelist_paths:
+                if os.path.exists(path):
+                    gamelist_path = path
+                    break
+            
+            if not gamelist_path:
                 continue
             
             # Parse the gamelist.xml
@@ -1459,7 +1543,7 @@ def publish_game_collection_stats():
     """Publish game collection statistics to MQTT"""
     try:
         config = get_config()
-        topic_prefix = config.get('mqtt_topic_prefix', 'retropie')
+        topic_prefix = config.get('mqtt_topic_prefix', SYSTEM_NAME)
         
         # Prepare payload
         payload = {
@@ -1883,9 +1967,8 @@ def start_mqtt_listener(max_retries=10):
     if not config.get('mqtt_host'):
         logger.error("MQTT host not configured, cannot start listener")
         return False
-    
-    # Create a more robust client with auto-reconnect
-    client = mqtt.Client(client_id=f"retropie-ha-{int(time.time())}", clean_session=True)
+      # Create a more robust client with auto-reconnect
+    client = mqtt.Client(client_id=f"{SYSTEM_NAME}-ha-{int(time.time())}", clean_session=True)
     client.on_connect = on_connect
     client.on_message = on_message
     
@@ -1913,9 +1996,8 @@ def start_mqtt_listener(max_retries=10):
             client.connect(config['mqtt_host'], int(config.get('mqtt_port', 1883)), 15)
             client.loop_start()
             logger.info("MQTT listener started successfully")
-            
-            # Add will message so Home Assistant knows when we're offline
-            topic_prefix = config.get('mqtt_topic_prefix', 'retropie')
+              # Add will message so Home Assistant knows when we're offline
+            topic_prefix = config.get('mqtt_topic_prefix', SYSTEM_NAME)
             will_topic = f"{topic_prefix}/availability"
             client.will_set(will_topic, "offline", qos=1, retain=True)
             
@@ -1964,7 +2046,7 @@ def start_mqtt_listener(max_retries=10):
 def register_with_ha():
     """Register device with Home Assistant via MQTT discovery"""
     config = get_config()
-    topic_prefix = config.get('mqtt_topic_prefix', 'retropie')
+    topic_prefix = config.get('mqtt_topic_prefix', SYSTEM_NAME)
     device_name = config.get('device_name', socket.gethostname())
     
     # Clean device_name to avoid issues with MQTT topics
