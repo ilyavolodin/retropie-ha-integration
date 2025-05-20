@@ -1,6 +1,7 @@
 #!/bin/bash
 # Batocera-specific installation script (no sudo required) - NOT MEANT TO BE RUN DIRECTLY
 # This should only be called from install.sh
+# Note: Batocera has Python preinstalled but may not have pip - we use what's available
 
 set -e
 
@@ -64,18 +65,70 @@ mkdir -p "$CONFIG_DIR"
 mkdir -p "$ES_SCRIPTS_DIR/game-start" "$ES_SCRIPTS_DIR/game-end" "$ES_SCRIPTS_DIR/game-select" "$ES_SCRIPTS_DIR/system-select" "$ES_SCRIPTS_DIR/quit"
 mkdir -p "$RC_SCRIPTS_DIR/runcommand-onstart" "$RC_SCRIPTS_DIR/runcommand-onend"
 
-# Install dependencies
-echo "Installing dependencies..."
-# Note: Batocera already has most required packages
-# Try to install additional packages if needed
-opkg update
-opkg install python3-paho-mqtt mosquitto-clients alsa-utils
+# Python prerequisites and dependencies are now handled in the main install.sh script
+echo "Using Python dependencies installed by the main installer."
+
+# We can now directly access PYTHON_PACKAGE_DIR that was set and exported from install.sh
+
+# Check for mosquitto clients
+if command -v mosquitto_pub >/dev/null 2>&1; then
+    echo "mosquitto-clients are available."
+else
+    echo "Warning: mosquitto-clients not found. Some MQTT testing features may be unavailable."
+    echo "You can install them manually if needed."
+fi
 
 # Copy Python scripts
 echo "Copying Python scripts..."
 cp -f "$(dirname "$0")/src/mqtt_client.py" "$CONFIG_DIR/mqtt_client.py"
 cp -f "$(dirname "$0")/src/status_reporter.py" "$CONFIG_DIR/status_reporter.py"
 chmod +x "$CONFIG_DIR/mqtt_client.py" "$CONFIG_DIR/status_reporter.py"
+
+# Also create a helper script for manual dependency installation
+cat > "$CONFIG_DIR/install_dependencies.sh" << 'EOF'
+#!/bin/bash
+# Helper script to manually install required dependencies
+
+echo "Installing Python dependencies for Home Assistant integration..."
+
+# Create Python package directory
+PYTHON_PACKAGE_DIR="/userdata/system/python"
+mkdir -p "$PYTHON_PACKAGE_DIR"
+
+# Install pip if needed
+if ! command -v pip3 >/dev/null 2>&1; then
+    echo "Installing pip..."
+    curl -s -o /tmp/get-pip.py https://bootstrap.pypa.io/get-pip.py
+    python3 /tmp/get-pip.py --user
+    # Add pip to PATH
+    export PATH="$HOME/.local/bin:$PATH"
+fi
+
+# Install required packages
+if command -v pip3 >/dev/null 2>&1; then
+    echo "Installing paho-mqtt..."
+    pip3 install --target="$PYTHON_PACKAGE_DIR" paho-mqtt
+    echo "Installing watchdog (optional)..."
+    pip3 install --target="$PYTHON_PACKAGE_DIR" watchdog || echo "Watchdog installation failed but it's optional."
+    
+    # Set PYTHONPATH
+    export PYTHONPATH="$PYTHON_PACKAGE_DIR:$PYTHONPATH"
+    echo "PYTHONPATH set to: $PYTHONPATH"
+    
+    # Add to .bashrc for future sessions
+    if ! grep -q "PYTHONPATH.*$PYTHON_PACKAGE_DIR" "$HOME/.bashrc" 2>/dev/null; then
+        echo "export PYTHONPATH=\"$PYTHON_PACKAGE_DIR:\$PYTHONPATH\"" >> "$HOME/.bashrc"
+        echo "PYTHONPATH added to .bashrc"
+    fi
+    
+    echo "Dependencies installed successfully!"
+    echo "Restart the service with: systemctl restart batocera-ha.service"
+else
+    echo "ERROR: pip installation failed. Please try manually."
+fi
+EOF
+
+chmod +x "$CONFIG_DIR/install_dependencies.sh"
 
 # Copy EmulationStation scripts
 echo "Installing EmulationStation scripts..."
@@ -137,7 +190,8 @@ Type=simple
 User=root
 WorkingDirectory=/
 ExecStartPre=/bin/sleep 10
-ExecStart=/usr/bin/python3 $CONFIG_DIR/status_reporter.py
+# Source the PYTHONPATH environment before starting
+ExecStart=/bin/bash -c "source $CONFIG_DIR/pythonpath.sh && /usr/bin/python3 $CONFIG_DIR/status_reporter.py"
 Restart=always
 RestartSec=30
 StandardOutput=journal
@@ -151,6 +205,9 @@ EOF
 echo "Installing systemd service..."
 mkdir -p /userdata/system/services/
 mv /tmp/${SERVICE_NAME} /userdata/system/services/
+
+# Ensure /etc/systemd/system directory exists
+mkdir -p /etc/systemd/system/
 ln -sf /userdata/system/services/${SERVICE_NAME} /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable ${SERVICE_NAME}

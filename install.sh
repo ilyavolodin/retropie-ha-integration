@@ -139,6 +139,118 @@ EOL
 
 echo "Configuration updated."
 
+# Check Python prerequisites and install dependencies if needed
+echo "Checking Python prerequisites..."
+
+# Check if Python is available
+if ! command -v python3 >/dev/null 2>&1; then
+    echo "ERROR: Python 3 is not installed. This is required for the integration."
+    echo "Please ensure Python 3 is properly installed on your system."
+    exit 1
+fi
+
+echo "Python 3 is available."
+
+# Function to install pip if needed
+install_pip() {
+    if ! command -v pip3 >/dev/null 2>&1; then
+        echo "Installing pip..."
+        # Use get-pip.py method (most reliable cross-platform)
+        curl -s -o /tmp/get-pip.py https://bootstrap.pypa.io/get-pip.py
+        python3 /tmp/get-pip.py --user
+        # Add pip to PATH if installed to user directory
+        export PATH="$HOME/.local/bin:$PATH"
+        rm -f /tmp/get-pip.py
+    fi
+}
+
+# Create a Python package directory if it doesn't exist (for Batocera)
+if [ "$SYSTEM_TYPE" = "batocera" ]; then
+    PYTHON_PACKAGE_DIR="/userdata/system/python"
+    mkdir -p "$PYTHON_PACKAGE_DIR"
+fi
+
+# Check for paho-mqtt and install if missing
+echo "Checking for paho-mqtt module..."
+if python3 -c "import paho.mqtt.client" 2>/dev/null; then
+    echo "paho-mqtt module is available."
+else
+    echo "paho-mqtt module is missing. Attempting to install..."
+    
+    if [ "$SYSTEM_TYPE" = "retropie" ]; then
+        # For RetroPie, use apt-get
+        echo "Installing paho-mqtt via apt-get..."
+        sudo apt-get update && sudo apt-get install -y python3-paho-mqtt
+    else
+        # For Batocera or other systems
+        # First check if we can use the package manager
+        if command -v opkg >/dev/null 2>&1; then
+            echo "Trying to install paho-mqtt via opkg..."
+            opkg update && opkg install python3-paho-mqtt
+        else
+            # Try to install pip first
+            install_pip
+            
+            if command -v pip3 >/dev/null 2>&1; then
+                echo "Installing paho-mqtt via pip..."
+                
+                if [ "$SYSTEM_TYPE" = "batocera" ]; then
+                    # Try to install to a writeable directory for Batocera
+                    pip3 install --target="$PYTHON_PACKAGE_DIR" paho-mqtt
+                    
+                    # Add the package directory to Python path
+                    export PYTHONPATH="$PYTHON_PACKAGE_DIR:$PYTHONPATH"
+                    echo "PYTHONPATH set to: $PYTHONPATH"
+                else
+                    # For other systems, standard pip install
+                    pip3 install paho-mqtt
+                fi
+                
+                # Verify installation
+                if python3 -c "import paho.mqtt.client" 2>/dev/null; then
+                    echo "Successfully installed paho-mqtt."
+                else
+                    echo "ERROR: Failed to install paho-mqtt. Integration may not work correctly."
+                    echo "Please manually install the paho-mqtt Python package."
+                fi
+            else
+                echo "ERROR: Could not install pip. Cannot install required dependencies."
+                echo "Please manually install paho-mqtt Python package."
+            fi
+        fi
+    fi
+fi
+
+# Check for watchdog module (optional)
+echo "Checking for watchdog module (optional)..."
+if python3 -c "import watchdog" 2>/dev/null; then
+    echo "watchdog module is available."
+else
+    echo "watchdog module is not available (optional feature)."
+    
+    if [ "$SYSTEM_TYPE" = "retropie" ]; then
+        echo "Attempting to install watchdog for RetroPie..."
+        if sudo apt-get install -y python3-watchdog; then
+            echo "Successfully installed watchdog via apt"
+        else
+            echo "Could not install watchdog via apt, trying pip..."
+            pip3 install watchdog || echo "Watchdog installation failed but it's optional."
+        fi
+    elif [ "$SYSTEM_TYPE" = "batocera" ]; then
+        echo "Attempting to install watchdog for Batocera..."
+        pip3 install --target="$PYTHON_PACKAGE_DIR" watchdog || echo "Watchdog installation failed but it's optional."
+    fi
+    
+    echo "Some file monitoring features will be disabled."
+fi
+
+# If we're on Batocera, create a PYTHONPATH setup script
+if [ "$SYSTEM_TYPE" = "batocera" ]; then
+    echo "# Add custom Python packages to PYTHONPATH" > "$CONFIG_DIR/pythonpath.sh"
+    echo "export PYTHONPATH=\"$PYTHON_PACKAGE_DIR:\$PYTHONPATH\"" >> "$CONFIG_DIR/pythonpath.sh"
+    chmod +x "$CONFIG_DIR/pythonpath.sh"
+fi
+
 # Find the system-specific installation scripts
 SCRIPT_DIR="$(dirname "$0")"
 
@@ -146,6 +258,7 @@ SCRIPT_DIR="$(dirname "$0")"
 export MQTT_HOST MQTT_PORT MQTT_USERNAME MQTT_PASSWORD MQTT_TOPIC_PREFIX DEVICE_NAME UPDATE_INTERVAL CONFIG_DIR SYSTEM_NAME
 # Export a special flag to indicate the script is being called from the main installer
 export CALLED_FROM_INSTALLER=true
+export PYTHON_PACKAGE_DIR
 
 # Call the appropriate installation script based on the detected system type
 if [ "$SYSTEM_TYPE" = "retropie" ]; then
