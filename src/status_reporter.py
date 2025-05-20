@@ -16,7 +16,7 @@ if os.path.exists("/opt/retropie"):
     SYSTEM_NAME = "retropie"
 elif os.path.exists("/userdata/system"):
     SYSTEM_TYPE = "batocera"
-    CONFIG_DIR = "/userdata/system/retropie-ha"
+    CONFIG_DIR = "/userdata/system/batocera_ha"
     SYSTEM_NAME = "batocera"
 else:
     # Fallback to RetroPie defaults
@@ -28,7 +28,7 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler(os.path.join(CONFIG_DIR, 'retropie-ha.log'))
+        logging.FileHandler(os.path.join(CONFIG_DIR, 'batocera_ha.log'))
         # Removed StreamHandler to prevent console output
     ]
 )

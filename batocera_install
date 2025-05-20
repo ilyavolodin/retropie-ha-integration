@@ -34,13 +34,13 @@ echo "Installing integration..."
 # Check for existing installation and remove it if found
 echo "Checking for existing installation..."
 # Batocera uses batocera-services for service management
-if [ -f /userdata/system/services/batocera-ha.service ]; then
+if [ -f /userdata/system/services/batocera_ha.service ]; then
     echo "Stopping existing service if running..."
     # Check if the service is managed by batocera-services
-    if batocera-services status batocera-ha >/dev/null 2>&1; then
+    if batocera-services status batocera_ha >/dev/null 2>&1; then
         echo "Stopping service using batocera-services..."
-        batocera-services stop batocera-ha
-        batocera-services disable batocera-ha
+        batocera-services stop batocera_ha
+        batocera-services disable batocera_ha
     else
         # Fallback to kill the process if found
         EXISTING_PID=$(ps aux | grep "[s]tatus_reporter.py" | awk '{print $1}')
@@ -51,7 +51,7 @@ if [ -f /userdata/system/services/batocera-ha.service ]; then
     fi
     
     echo "Removing existing service file..."
-    rm -f /userdata/system/services/batocera-ha.service
+    rm -f /userdata/system/services/batocera_ha.service
     echo "Service file removed."
 fi
 
@@ -179,7 +179,7 @@ chmod +x "$RC_SCRIPTS_DIR/custom.pre.sh.d/01_report_game_start.sh" "$RC_SCRIPTS_
 
 # Create service file - Batocera uses executable service files
 echo "Creating service file..."
-SERVICE_NAME="batocera-ha"
+SERVICE_NAME="batocera_ha"
 SERVICE_DESC="Batocera Home Assistant Integration"
 
 # Create an executable shell script to run as a service
@@ -191,10 +191,10 @@ cat > /tmp/${SERVICE_NAME} << 'EOF'
 sleep 10
 
 # Source PYTHONPATH and start the reporter
-CONFIG_DIR="/userdata/system/retropie-ha"
+CONFIG_DIR="/userdata/system/batocera_ha"
 if [ -f "$CONFIG_DIR/pythonpath.sh" ]; then
     source "$CONFIG_DIR/pythonpath.sh"
-    exec python3 "$CONFIG_DIR/status_reporter.py" > /tmp/batocera-ha.log 2>&1 &
+    exec python3 "$CONFIG_DIR/status_reporter.py" > /tmp/batocera_ha.log 2>&1 &
     echo $! > "$CONFIG_DIR/reporter.pid"
 else
     echo "ERROR: Cannot find $CONFIG_DIR/pythonpath.sh" >&2
@@ -203,7 +203,7 @@ fi
 EOF
 
 # Replace CONFIG_DIR with the actual value in the script
-sed -i "s|/userdata/system/retropie-ha|$CONFIG_DIR|g" /tmp/${SERVICE_NAME}
+sed -i "s|/userdata/system/batocera_ha|$CONFIG_DIR|g" /tmp/${SERVICE_NAME}
 
 # Install service using Batocera's service management approach
 echo "Installing service..."
@@ -212,33 +212,33 @@ mv /tmp/${SERVICE_NAME} /userdata/system/services/
 
 # Start the service using Batocera's approach
 echo "Starting service..."
-if batocera-services enable batocera-ha 2>/dev/null; then
+if batocera-services enable batocera_ha 2>/dev/null; then
     echo "Service enabled via batocera-services"
-    batocera-services start batocera-ha
+    batocera-services start batocera_ha
 else
     echo "Could not enable service via batocera-services, trying direct start..."
     # Fallback to direct script execution
     echo "Starting service directly..."
     # We'll start it in the background and redirect output
     source $CONFIG_DIR/pythonpath.sh
-    nohup python3 $CONFIG_DIR/status_reporter.py > /tmp/batocera-ha.log 2>&1 &
+    nohup python3 $CONFIG_DIR/status_reporter.py > /tmp/batocera_ha.log 2>&1 &
     echo $! > "$CONFIG_DIR/reporter.pid"
     
     # Add to custom.sh to auto-start on boot
     if [ -d "/userdata/system" ]; then
         mkdir -p /userdata/system/custom.sh.d
-        cat > "/userdata/system/custom.sh.d/999-start-batocera-ha.sh" << 'EOF'
+        cat > "/userdata/system/custom.sh.d/999-start-batocera_ha.sh" << 'EOF'
 #!/bin/bash
 # Auto-start Home Assistant Integration
-CONFIG_DIR="/userdata/system/retropie-ha"
+CONFIG_DIR="/userdata/system/batocera_ha"
 if [ -f "$CONFIG_DIR/pythonpath.sh" ]; then
     source "$CONFIG_DIR/pythonpath.sh"
-    nohup python3 "$CONFIG_DIR/status_reporter.py" > /tmp/batocera-ha.log 2>&1 &
+    nohup python3 "$CONFIG_DIR/status_reporter.py" > /tmp/batocera_ha.log 2>&1 &
     echo $! > "$CONFIG_DIR/reporter.pid"
     echo "Batocera Home Assistant Integration started"
 fi
 EOF
-        chmod +x "/userdata/system/custom.sh.d/999-start-batocera-ha.sh"
+        chmod +x "/userdata/system/custom.sh.d/999-start-batocera_ha.sh"
     fi
 fi
 
@@ -247,16 +247,16 @@ echo "Verifying installation..."
 sleep 2
 if pgrep -f "status_reporter.py" > /dev/null; then
     echo "Service is running correctly."
-    echo "You can check logs with: cat /tmp/batocera-ha.log"
+    echo "You can check logs with: cat /tmp/batocera_ha.log"
     echo "If you encounter any issues, you can restart the service with:"
-    echo "kill \$(cat $CONFIG_DIR/reporter.pid) 2>/dev/null; source $CONFIG_DIR/pythonpath.sh && python3 $CONFIG_DIR/status_reporter.py > /tmp/batocera-ha.log 2>&1 &"
+    echo "kill \$(cat $CONFIG_DIR/reporter.pid) 2>/dev/null; source $CONFIG_DIR/pythonpath.sh && python3 $CONFIG_DIR/status_reporter.py > /tmp/batocera_ha.log 2>&1 &"
 else
-    echo "Service failed to start. Check logs with: cat /tmp/batocera-ha.log"
+    echo "Service failed to start. Check logs with: cat /tmp/batocera_ha.log"
     echo "Attempting to start service directly..."
     source $CONFIG_DIR/pythonpath.sh
-    python3 $CONFIG_DIR/status_reporter.py > /tmp/batocera-ha.log 2>&1 &
+    python3 $CONFIG_DIR/status_reporter.py > /tmp/batocera_ha.log 2>&1 &
     echo $! > "$CONFIG_DIR/reporter.pid"
-    echo "Service started directly. Check logs with: cat /tmp/batocera-ha.log"
+    echo "Service started directly. Check logs with: cat /tmp/batocera_ha.log"
 fi
 
 # Setup RetroArch network commands
@@ -358,14 +358,14 @@ echo ""
 echo "Installation completed successfully!"
 echo "The Batocera Home Assistant Integration is now running."
 echo ""
-echo "To check status: batocera-services status batocera-ha"
-echo "To view logs: cat /tmp/batocera-ha.log"
-echo "To view integration logs: cat $CONFIG_DIR/retropie-ha.log"
+echo "To check status: batocera-services status batocera_ha"
+echo "To view logs: cat /tmp/batocera_ha.log"
+echo "To view integration logs: cat $CONFIG_DIR/batocera_ha.log"
 echo ""
 echo "Service management commands:"
-echo "- Stop service:   batocera-services stop batocera-ha"
-echo "- Start service:  batocera-services start batocera-ha"
-echo "- Restart:        batocera-services restart batocera-ha"
+echo "- Stop service:   batocera-services stop batocera_ha"
+echo "- Start service:  batocera-services start batocera_ha"
+echo "- Restart:        batocera-services restart batocera_ha"
 echo ""
 echo "To manually start the service: source $CONFIG_DIR/pythonpath.sh && python3 $CONFIG_DIR/status_reporter.py"
 echo ""
