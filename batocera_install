@@ -1,0 +1,211 @@
+#!/bin/bash
+# Batocera-specific installation script (no sudo required) - NOT MEANT TO BE RUN DIRECTLY
+# This should only be called from install.sh
+
+set -e
+
+# Verify this script is being called from the main installer
+if [ -z "$CALLED_FROM_INSTALLER" ]; then
+    echo "ERROR: This script should not be run directly."
+    echo "       Please run ./install.sh instead."
+    exit 1
+fi
+
+# Configuration variables are now passed from the main install script
+# Only define system-specific paths here
+ES_SCRIPTS_DIR="/userdata/system/configs/emulationstation/scripts"
+RC_SCRIPTS_DIR="/userdata/system/configs/emulationstation"
+
+# If any of the required variables are not set, exit with an error
+if [ -z "$CONFIG_DIR" ] || [ -z "$MQTT_HOST" ] || [ -z "$MQTT_PORT" ]; then
+    echo "Error: Required configuration variables not set. Something went wrong with the installer."
+    exit 1
+fi
+
+# Display banner
+echo "============================================="
+echo "  Batocera Home Assistant Integration Setup  "
+echo "============================================="
+echo ""
+
+echo "Installing integration..."
+
+# Check for existing installation and remove it if found
+echo "Checking for existing installation..."
+if systemctl is-active --quiet batocera-ha.service 2>/dev/null; then 
+    echo "Stopping existing service..."
+    systemctl stop batocera-ha.service
+    systemctl disable batocera-ha.service
+    echo "Service stopped and disabled."
+fi
+
+if [ -f /etc/systemd/system/batocera-ha.service ]; then
+    echo "Removing existing service file..."
+    rm -f /etc/systemd/system/batocera-ha.service
+    systemctl daemon-reload
+    echo "Service file removed."
+fi
+
+# Clean up any existing PID file
+if [ -f "$CONFIG_DIR/reporter.pid" ]; then
+    echo "Cleaning up old PID file..."
+    # Check if the process is still running and kill it
+    OLD_PID=$(cat "$CONFIG_DIR/reporter.pid")
+    if kill -0 $OLD_PID 2>/dev/null; then
+        echo "Terminating old process (PID: $OLD_PID)..."
+        kill $OLD_PID
+    fi
+    rm -f "$CONFIG_DIR/reporter.pid"
+fi
+
+# Create directories
+echo "Creating directories..."
+mkdir -p "$CONFIG_DIR" 
+mkdir -p "$ES_SCRIPTS_DIR/game-start" "$ES_SCRIPTS_DIR/game-end" "$ES_SCRIPTS_DIR/game-select" "$ES_SCRIPTS_DIR/system-select" "$ES_SCRIPTS_DIR/quit"
+mkdir -p "$RC_SCRIPTS_DIR/runcommand-onstart" "$RC_SCRIPTS_DIR/runcommand-onend"
+
+# Install dependencies
+echo "Installing dependencies..."
+# Note: Batocera already has most required packages
+# Try to install additional packages if needed
+opkg update
+opkg install python3-paho-mqtt mosquitto-clients alsa-utils
+
+# Copy Python scripts
+echo "Copying Python scripts..."
+cp -f "$(dirname "$0")/src/mqtt_client.py" "$CONFIG_DIR/mqtt_client.py"
+cp -f "$(dirname "$0")/src/status_reporter.py" "$CONFIG_DIR/status_reporter.py"
+chmod +x "$CONFIG_DIR/mqtt_client.py" "$CONFIG_DIR/status_reporter.py"
+
+# Copy EmulationStation scripts
+echo "Installing EmulationStation scripts..."
+cp -f "$(dirname "$0")/scripts/game-start/"* "$ES_SCRIPTS_DIR/game-start/"
+cp -f "$(dirname "$0")/scripts/game-end/"* "$ES_SCRIPTS_DIR/game-end/"
+cp -f "$(dirname "$0")/scripts/game-select/"* "$ES_SCRIPTS_DIR/game-select/"
+cp -f "$(dirname "$0")/scripts/system-select/"* "$ES_SCRIPTS_DIR/system-select/"
+cp -f "$(dirname "$0")/scripts/quit/"* "$ES_SCRIPTS_DIR/quit/"
+chmod +x "$ES_SCRIPTS_DIR"/*/*.sh
+
+# Copy RunCommand scripts
+echo "Installing RunCommand scripts..."
+cp -f "$(dirname "$0")/scripts/game-start/"* "$RC_SCRIPTS_DIR/runcommand-onstart/"
+cp -f "$(dirname "$0")/scripts/game-end/"* "$RC_SCRIPTS_DIR/runcommand-onend/"
+chmod +x "$RC_SCRIPTS_DIR/runcommand-onstart/"* "$RC_SCRIPTS_DIR/runcommand-onend/"*
+
+# Create Batocera-specific hooks
+echo "Creating Batocera-specific hooks..."
+mkdir -p "$RC_SCRIPTS_DIR/custom.pre.sh.d" "$RC_SCRIPTS_DIR/custom.sh.d"
+
+cat > "$RC_SCRIPTS_DIR/custom.pre.sh.d/01_report_game_start.sh" << 'EOF'
+#!/bin/bash
+# Log the event
+echo "[$(date)] Batocera Game Start: $@" >> /tmp/batocera_events.log
+# Call the report script
+ES_SCRIPTS_DIR="/userdata/system/configs/emulationstation/scripts"
+"$ES_SCRIPTS_DIR/game-start/01_report_game_start.sh" "$@"
+EOF
+
+cat > "$RC_SCRIPTS_DIR/custom.sh.d/99_report_game_end.sh" << 'EOF'
+#!/bin/bash
+# Log the event
+echo "[$(date)] Batocera Game End: $@" >> /tmp/batocera_events.log
+# Call the report script
+ES_SCRIPTS_DIR="/userdata/system/configs/emulationstation/scripts"
+"$ES_SCRIPTS_DIR/game-end/01_report_game_end.sh" "$@"
+EOF
+
+# Set permissions for Batocera hooks
+chmod +x "$RC_SCRIPTS_DIR/custom.pre.sh.d/01_report_game_start.sh" "$RC_SCRIPTS_DIR/custom.sh.d/99_report_game_end.sh"
+
+# Create systemd service
+echo "Creating systemd service..."
+SERVICE_NAME="batocera-ha.service"
+SERVICE_DESC="Batocera Home Assistant Integration"
+CURRENT_USER=$(whoami)
+HOME_DIR=$(eval echo ~$CURRENT_USER)
+
+# Create service file with correct paths
+cat > /tmp/${SERVICE_NAME} << EOF
+[Unit]
+Description=${SERVICE_DESC}
+After=network-online.target
+Wants=network-online.target
+Requires=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/
+ExecStartPre=/bin/sleep 10
+ExecStart=/usr/bin/python3 $CONFIG_DIR/status_reporter.py
+Restart=always
+RestartSec=30
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# Install service (no sudo needed on Batocera)
+echo "Installing systemd service..."
+mkdir -p /userdata/system/services/
+mv /tmp/${SERVICE_NAME} /userdata/system/services/
+ln -sf /userdata/system/services/${SERVICE_NAME} /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable ${SERVICE_NAME}
+
+# Start the service
+systemctl start ${SERVICE_NAME}
+
+# Verify installation
+echo "Verifying installation..."
+sleep 2
+if systemctl is-active --quiet ${SERVICE_NAME}; then
+    echo "Service is running correctly."
+else
+    echo "Service failed to start. Check logs with: journalctl -u ${SERVICE_NAME}"
+fi
+
+# Setup RetroArch network commands
+echo "Setting up RetroArch Network Commands..."
+RETROARCH_CFG="/userdata/system/configs/retroarch/retroarch.cfg"
+
+if [ -f "$RETROARCH_CFG" ]; then
+    echo "Found RetroArch config at: $RETROARCH_CFG"
+    
+    # Check if network_cmd_enable is already set
+    if grep -q "network_cmd_enable" "$RETROARCH_CFG"; then
+      # Update existing setting
+      sed -i 's/network_cmd_enable = "false"/network_cmd_enable = "true"/g' "$RETROARCH_CFG"
+      echo "Updated network_cmd_enable setting to true in $RETROARCH_CFG"
+    else
+      # Add the setting if it doesn't exist
+      echo 'network_cmd_enable = "true"' >> "$RETROARCH_CFG"
+      echo "Added network_cmd_enable = true to $RETROARCH_CFG"
+    fi
+    
+    # Optionally set the network command port if you want to use a specific port
+    if ! grep -q "network_cmd_port" "$RETROARCH_CFG"; then
+      echo 'network_cmd_port = "55355"' >> "$RETROARCH_CFG"
+      echo "Added default network_cmd_port = 55355 to $RETROARCH_CFG"
+    fi
+    
+    RETROARCH_ENABLED=true
+else
+    echo "WARNING: Could not find RetroArch configuration file."
+    echo "To enable RetroArch Network Commands manually, set:"
+    echo "network_cmd_enable = \"true\" in retroarch.cfg"
+    RETROARCH_ENABLED=false
+fi
+
+echo ""
+echo "Installation completed successfully!"
+echo "The Batocera Home Assistant Integration is now running."
+echo ""
+echo "To check status: systemctl status ${SERVICE_NAME}"
+echo "To view logs: journalctl -u ${SERVICE_NAME}"
+echo "To view integration logs: cat $CONFIG_DIR/retropie-ha.log"
+echo ""
+echo "Your Batocera system will now report events and status to Home Assistant via MQTT."
+echo "Home Assistant should auto-discover the sensors if MQTT integration is configured."

@@ -1,44 +1,36 @@
 #!/bin/bash
-# Installation script for RetroPie/Batocera Home Assistant Integration
+# Main installation script for RetroPie/Batocera Home Assistant Integration
+# This script handles configuration and calls the system-specific installation script
 
 set -e
+
+# Display banner
+echo "============================================="
+echo "  Home Assistant Integration Setup Launcher  "
+echo "============================================="
+echo ""
 
 # Detect system type: RetroPie or Batocera
 SYSTEM_TYPE="unknown"
 if [ -d "/opt/retropie" ]; then
     SYSTEM_TYPE="retropie"
     echo "Detected system: RetroPie"
+    CONFIG_DIR="$HOME/.config/retropie-ha"
+    SYSTEM_NAME="retropie"
+    DEFAULT_TOPIC_PREFIX="retropie/arcade"
 elif [ -d "/userdata/system" ]; then
     SYSTEM_TYPE="batocera"
     echo "Detected system: Batocera"
+    CONFIG_DIR="/userdata/system/retropie-ha"
+    SYSTEM_NAME="batocera"
+    DEFAULT_TOPIC_PREFIX="batocera/arcade"
 else
     echo "Unknown system type. This script requires either RetroPie or Batocera."
-    echo "Installation will continue but may not work correctly."
+    echo "Please install on a compatible system."
+    exit 1
 fi
 
-# Configuration based on system type
-if [ "$SYSTEM_TYPE" = "retropie" ]; then
-    CONFIG_DIR="$HOME/.config/retropie-ha"
-    ES_SCRIPTS_DIR="$HOME/.emulationstation/scripts"
-    RC_SCRIPTS_DIR="/opt/retropie/configs/all"
-    SYSTEM_NAME="retropie"
-elif [ "$SYSTEM_TYPE" = "batocera" ]; then
-    CONFIG_DIR="/userdata/system/retropie-ha"
-    ES_SCRIPTS_DIR="/userdata/system/configs/emulationstation/scripts"
-    RC_SCRIPTS_DIR="/userdata/system/configs/emulationstation"
-    SYSTEM_NAME="batocera"
-else
-    # Fallback to RetroPie defaults
-    CONFIG_DIR="$HOME/.config/retropie-ha"
-    ES_SCRIPTS_DIR="$HOME/.emulationstation/scripts"
-    RC_SCRIPTS_DIR="/opt/retropie/configs/all"
-    SYSTEM_NAME="retropie"
-fi
-
-# Display banner
-echo "============================================="
-echo "  ${SYSTEM_NAME^} Home Assistant Integration Setup  "
-echo "============================================="
+echo "Setting up configuration..."
 echo ""
 
 # Check if we have an existing config file
@@ -121,8 +113,8 @@ else
         echo ""
     fi
     
-    read -p "MQTT Topic Prefix [${SYSTEM_NAME}/${DEVICE_NAME}]: " MQTT_TOPIC_PREFIX
-    MQTT_TOPIC_PREFIX=${MQTT_TOPIC_PREFIX:-${SYSTEM_NAME}/arcade}
+    read -p "MQTT Topic Prefix [$DEFAULT_TOPIC_PREFIX]: " MQTT_TOPIC_PREFIX
+    MQTT_TOPIC_PREFIX=${MQTT_TOPIC_PREFIX:-$DEFAULT_TOPIC_PREFIX}
     
     read -p "Device Name [arcade]: " DEVICE_NAME
     DEVICE_NAME=${DEVICE_NAME:-arcade}
@@ -146,397 +138,34 @@ cat > "$CONFIG_DIR/config.json" << EOL
 EOL
 
 echo "Configuration updated."
-echo "Installing integration..."
 
-# Check for existing installation and remove it if found
-echo "Checking for existing installation..."
-if systemctl is-active --quiet retropie-ha.service 2>/dev/null; then 
-    echo "Stopping existing service..."
-    sudo systemctl stop retropie-ha.service
-    sudo systemctl disable retropie-ha.service
-    echo "Service stopped and disabled."
-fi
+# Find the system-specific installation scripts
+SCRIPT_DIR="$(dirname "$0")"
 
-if [ -f /etc/systemd/system/retropie-ha.service ]; then
-    echo "Removing existing service file..."
-    sudo rm -f /etc/systemd/system/retropie-ha.service
-    sudo systemctl daemon-reload
-    echo "Service file removed."
-fi
+# Export variables for use in the system-specific installation scripts
+export MQTT_HOST MQTT_PORT MQTT_USERNAME MQTT_PASSWORD MQTT_TOPIC_PREFIX DEVICE_NAME UPDATE_INTERVAL CONFIG_DIR SYSTEM_NAME
+# Export a special flag to indicate the script is being called from the main installer
+export CALLED_FROM_INSTALLER=true
 
-# Clean up any existing PID file
-if [ -f "$CONFIG_DIR/reporter.pid" ]; then
-    echo "Cleaning up old PID file..."
-    # Check if the process is still running and kill it
-    OLD_PID=$(cat "$CONFIG_DIR/reporter.pid")
-    if kill -0 $OLD_PID 2>/dev/null; then
-        echo "Terminating old process (PID: $OLD_PID)..."
-        kill $OLD_PID
-    fi
-    rm -f "$CONFIG_DIR/reporter.pid"
-fi
-
-# Create directories
-echo "Creating directories..."
-mkdir -p "$CONFIG_DIR" 
-mkdir -p "$ES_SCRIPTS_DIR/game-start" "$ES_SCRIPTS_DIR/game-end" "$ES_SCRIPTS_DIR/game-select" "$ES_SCRIPTS_DIR/system-select" "$ES_SCRIPTS_DIR/quit"
-sudo mkdir -p "$RC_SCRIPTS_DIR/runcommand-onstart" "$RC_SCRIPTS_DIR/runcommand-onend"
-
-# Install dependencies
-echo "Installing dependencies..."
-sudo apt-get update && sudo apt-get install -y python3-paho-mqtt mosquitto-clients libttspico-utils alsa-utils python3-pip
-
-# Install Python dependencies
-echo "Installing Python packages..."
-# Try to install python3-watchdog via apt first (preferred method)
-if sudo apt-get install -y python3-watchdog; then
-    echo "Successfully installed watchdog via apt"
-else
-    echo "Could not install watchdog via apt, trying pip..."
-    # Try pip with --break-system-packages flag (for newer Debian/Ubuntu systems)
-    if pip3 install watchdog --break-system-packages; then
-        echo "Successfully installed watchdog via pip with --break-system-packages"
-    else
-        echo "Could not install watchdog via pip with --break-system-packages, trying without the flag..."
-        # Try standard pip install as a last resort
-        if pip3 install watchdog; then
-            echo "Successfully installed watchdog via pip"
-        else
-            echo "WARNING: Failed to install watchdog. File monitoring will be disabled."
-            echo "To enable file monitoring, you can manually install watchdog using one of these methods:"
-            echo "  - sudo apt-get install python3-watchdog"
-            echo "  - pip3 install watchdog --break-system-packages"
-            echo "  - Create a virtual environment and install there"
-        fi
-    fi
-fi
-
-# Copy Python scripts
-echo "Copying Python scripts..."
-cp -f "$(dirname "$0")/src/mqtt_client.py" "$CONFIG_DIR/mqtt_client.py"
-cp -f "$(dirname "$0")/src/status_reporter.py" "$CONFIG_DIR/status_reporter.py"
-chmod +x "$CONFIG_DIR/mqtt_client.py" "$CONFIG_DIR/status_reporter.py"
-
-# Copy EmulationStation scripts
-echo "Installing EmulationStation scripts..."
-cp -f "$(dirname "$0")/scripts/game-start/"* "$ES_SCRIPTS_DIR/game-start/"
-cp -f "$(dirname "$0")/scripts/game-end/"* "$ES_SCRIPTS_DIR/game-end/"
-cp -f "$(dirname "$0")/scripts/game-select/"* "$ES_SCRIPTS_DIR/game-select/"
-cp -f "$(dirname "$0")/scripts/system-select/"* "$ES_SCRIPTS_DIR/system-select/"
-cp -f "$(dirname "$0")/scripts/quit/"* "$ES_SCRIPTS_DIR/quit/"
-chmod +x "$ES_SCRIPTS_DIR"/*/*.sh
-
-# Copy RunCommand scripts
-echo "Installing RunCommand scripts..."
-cp -f "$(dirname "$0")/scripts/game-start/"* "$RC_SCRIPTS_DIR/runcommand-onstart/"
-cp -f "$(dirname "$0")/scripts/game-end/"* "$RC_SCRIPTS_DIR/runcommand-onend/"
-chmod +x "$RC_SCRIPTS_DIR/runcommand-onstart/"* "$RC_SCRIPTS_DIR/runcommand-onend/"*
-
-# Create RunCommand hooks
-echo "Creating RunCommand hooks..."
-
+# Call the appropriate installation script based on the detected system type
 if [ "$SYSTEM_TYPE" = "retropie" ]; then
-    # RetroPie hooks
-    cat > "$RC_SCRIPTS_DIR/runcommand-onstart.sh" << 'EOF'
-#!/bin/bash
-# Log the event
-echo "[$(date)] RunCommand OnStart: $@" >> /tmp/retropie_events.log
-# Call the report script
-/opt/retropie/configs/all/runcommand-onstart/01_report_game_start.sh "$@"
-EOF
-
-    cat > "$RC_SCRIPTS_DIR/runcommand-onend.sh" << 'EOF'
-#!/bin/bash
-# Log the event
-echo "[$(date)] RunCommand OnEnd: $@" >> /tmp/retropie_events.log
-# Call the report script
-/opt/retropie/configs/all/runcommand-onend/01_report_game_end.sh "$@"
-EOF
-
-    # Set permissions for RunCommand hooks
-    chmod +x "$RC_SCRIPTS_DIR/runcommand-onstart.sh" "$RC_SCRIPTS_DIR/runcommand-onend.sh"
-
+    echo "Launching RetroPie-specific installation script..."
+    bash "$SCRIPT_DIR/retropie_install"
 elif [ "$SYSTEM_TYPE" = "batocera" ]; then
-    # Batocera hooks - creating custom scripts for launch and exit
-    mkdir -p "$RC_SCRIPTS_DIR/custom.pre.sh.d" "$RC_SCRIPTS_DIR/custom.sh.d"
-    
-    cat > "$RC_SCRIPTS_DIR/custom.pre.sh.d/01_report_game_start.sh" << 'EOF'
-#!/bin/bash
-# Log the event
-echo "[$(date)] Batocera Game Start: $@" >> /tmp/batocera_events.log
-# Call the report script
-"$ES_SCRIPTS_DIR/game-start/01_report_game_start.sh" "$@"
-EOF
-
-    cat > "$RC_SCRIPTS_DIR/custom.sh.d/99_report_game_end.sh" << 'EOF'
-#!/bin/bash
-# Log the event
-echo "[$(date)] Batocera Game End: $@" >> /tmp/batocera_events.log
-# Call the report script
-"$ES_SCRIPTS_DIR/game-end/01_report_game_end.sh" "$@"
-EOF
-
-    # Set permissions for Batocera hooks
-    chmod +x "$RC_SCRIPTS_DIR/custom.pre.sh.d/01_report_game_start.sh" "$RC_SCRIPTS_DIR/custom.sh.d/99_report_game_end.sh"
-fi
-
-# Fix EmulationStation audio mixer issue
-echo "Fixing EmulationStation audio mixer issue..."
-ES_SETTINGS="$HOME/.emulationstation/es_settings.cfg"
-if [ -f "$ES_SETTINGS" ]; then
-    # Create backup
-    cp -f "$ES_SETTINGS" "$ES_SETTINGS.bak"
-    # Remove existing VolumeControl entries and add our own
-    cat "$ES_SETTINGS" | grep -v "VolumeControl" > "$ES_SETTINGS.new"
-    echo '<bool name="VolumeControl" value="false" />' >> "$ES_SETTINGS.new"
-    mv "$ES_SETTINGS.new" "$ES_SETTINGS"
-    echo "EmulationStation audio mixer settings updated."
-fi
-
-# Create and install systemd service
-echo "Creating systemd service..."
-CURRENT_USER=$(whoami)
-HOME_DIR=$(eval echo ~$CURRENT_USER)
-
-if [ "$SYSTEM_TYPE" = "retropie" ]; then
-    SERVICE_NAME="retropie-ha.service"
-    SERVICE_DESC="RetroPie Home Assistant Integration"
-elif [ "$SYSTEM_TYPE" = "batocera" ]; then
-    SERVICE_NAME="batocera-ha.service"
-    SERVICE_DESC="Batocera Home Assistant Integration"
+    echo "Launching Batocera-specific installation script..."
+    bash "$SCRIPT_DIR/batocera_install"
 else
-    SERVICE_NAME="retropie-ha.service" # fallback
-    SERVICE_DESC="Home Assistant Integration"
-fi
-
-# Create service file with correct paths
-cat > /tmp/${SERVICE_NAME} << EOF
-[Unit]
-Description=${SERVICE_DESC}
-After=network-online.target
-Wants=network-online.target
-# Make sure to wait for network to be fully ready
-Requires=network-online.target
-
-[Service]
-Type=simple
-User=$CURRENT_USER
-WorkingDirectory=$HOME_DIR
-# Add a sleep to ensure network is fully ready
-ExecStartPre=/bin/sleep 10
-ExecStart=/usr/bin/python3 $CONFIG_DIR/status_reporter.py
-# More robust restart settings
-Restart=always
-RestartSec=30
-StandardOutput=journal
-StandardError=journal
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-# Install service
-echo "Installing systemd service..."
-if [ "$SYSTEM_TYPE" = "batocera" ]; then
-    # In Batocera, services go in /userdata/system/services/
-    mkdir -p /userdata/system/services/
-    sudo mv /tmp/${SERVICE_NAME} /userdata/system/services/
-    # Enable at startup by creating a link in /etc/systemd/system/
-    sudo ln -sf /userdata/system/services/${SERVICE_NAME} /etc/systemd/system/
-else
-    # Standard location for RetroPie
-    sudo mv /tmp/${SERVICE_NAME} /etc/systemd/system/
-fi
-
-sudo systemctl daemon-reload
-sudo systemctl enable ${SERVICE_NAME}
-
-# Delete any existing configurations in Home Assistant
-echo "Cleaning up old Home Assistant configurations..."
-# Safely remove old discovery configurations to avoid duplicates
-if [ -n "$MQTT_USERNAME" ]; then
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/sensor/${SYSTEM_NAME}_${DEVICE_NAME// /_}/cpu_temp/config" -n -r -d
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/sensor/${SYSTEM_NAME}_${DEVICE_NAME// /_}/gpu_temp/config" -n -r -d
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/sensor/${SYSTEM_NAME}_${DEVICE_NAME// /_}/game_status/config" -n -r -d
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/sensor/${SYSTEM_NAME}_${DEVICE_NAME// /_}/memory_usage/config" -n -r -d
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/sensor/${SYSTEM_NAME}_${DEVICE_NAME// /_}/cpu_load/config" -n -r -d
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/sensor/${SYSTEM_NAME}_${DEVICE_NAME// /_}/machine_status/config" -n -r -d
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/sensor/${SYSTEM_NAME}_${DEVICE_NAME// /_}/play_duration/config" -n -r -d
-    # Clear old device automation entities
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/device_automation/${SYSTEM_NAME}_${DEVICE_NAME// /_}/tts/config" -n -r -d
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/device_automation/${SYSTEM_NAME}_${DEVICE_NAME// /_}/retroarch_message/config" -n -r -d
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/device_automation/${SYSTEM_NAME}_${DEVICE_NAME// /_}/retroarch_command/config" -n -r -d
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/device_automation/${SYSTEM_NAME}_${DEVICE_NAME// /_}/retroarch_status/config" -n -r -d
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/device_automation/${SYSTEM_NAME}_${DEVICE_NAME// /_}/ui_mode/config" -n -r -d
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/device_automation/${SYSTEM_NAME}_${DEVICE_NAME// /_}/scan_games/config" -n -r -d
-    
-    # Clear new entities
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/text/${SYSTEM_NAME}_${DEVICE_NAME// /_}/tts_text/config" -n -r -d
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/button/${SYSTEM_NAME}_${DEVICE_NAME// /_}/tts_speak/config" -n -r -d
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/text/${SYSTEM_NAME}_${DEVICE_NAME// /_}/retroarch_message_text/config" -n -r -d
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/button/${SYSTEM_NAME}_${DEVICE_NAME// /_}/retroarch_display_message/config" -n -r -d
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/text/${SYSTEM_NAME}_${DEVICE_NAME// /_}/retroarch_command_text/config" -n -r -d
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/button/${SYSTEM_NAME}_${DEVICE_NAME// /_}/retroarch_execute_command/config" -n -r -d
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/button/${SYSTEM_NAME}_${DEVICE_NAME// /_}/retroarch_get_status/config" -n -r -d
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/select/${SYSTEM_NAME}_${DEVICE_NAME// /_}/ui_mode/config" -n -r -d
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/button/${SYSTEM_NAME}_${DEVICE_NAME// /_}/scan_games/config" -n -r -d
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/sensor/${SYSTEM_NAME}_${DEVICE_NAME// /_}/total_games/config" -n -r -d
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/sensor/${SYSTEM_NAME}_${DEVICE_NAME// /_}/favorites/config" -n -r -d
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t "homeassistant/sensor/${SYSTEM_NAME}_${DEVICE_NAME// /_}/kid_friendly/config" -n -r -d
-else
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/sensor/${SYSTEM_NAME}_${DEVICE_NAME// /_}/cpu_temp/config" -n -r -d
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/sensor/${SYSTEM_NAME}_${DEVICE_NAME// /_}/gpu_temp/config" -n -r -d
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/sensor/${SYSTEM_NAME}_${DEVICE_NAME// /_}/game_status/config" -n -r -d
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/sensor/${SYSTEM_NAME}_${DEVICE_NAME// /_}/memory_usage/config" -n -r -d
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/sensor/${SYSTEM_NAME}_${DEVICE_NAME// /_}/cpu_load/config" -n -r -d
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/sensor/${SYSTEM_NAME}_${DEVICE_NAME// /_}/machine_status/config" -n -r -d
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/sensor/${SYSTEM_NAME}_${DEVICE_NAME// /_}/play_duration/config" -n -r -d
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/device_automation/${SYSTEM_NAME}_${DEVICE_NAME// /_}/tts/config" -n -r -d
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/device_automation/${SYSTEM_NAME}_${DEVICE_NAME// /_}/retroarch_message/config" -n -r -d
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/device_automation/${SYSTEM_NAME}_${DEVICE_NAME// /_}/retroarch_command/config" -n -r -d
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/device_automation/${SYSTEM_NAME}_${DEVICE_NAME// /_}/retroarch_status/config" -n -r -d
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/device_automation/${SYSTEM_NAME}_${DEVICE_NAME// /_}/ui_mode/config" -n -r -d
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/device_automation/${SYSTEM_NAME}_${DEVICE_NAME// /_}/scan_games/config" -n -r -d
-    
-    # Clear new entities
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/text/${SYSTEM_NAME}_${DEVICE_NAME// /_}/tts_text/config" -n -r -d
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/button/${SYSTEM_NAME}_${DEVICE_NAME// /_}/tts_speak/config" -n -r -d
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/text/${SYSTEM_NAME}_${DEVICE_NAME// /_}/retroarch_message_text/config" -n -r -d
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/button/${SYSTEM_NAME}_${DEVICE_NAME// /_}/retroarch_display_message/config" -n -r -d
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/text/${SYSTEM_NAME}_${DEVICE_NAME// /_}/retroarch_command_text/config" -n -r -d
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/button/${SYSTEM_NAME}_${DEVICE_NAME// /_}/retroarch_execute_command/config" -n -r -d
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/button/${SYSTEM_NAME}_${DEVICE_NAME// /_}/retroarch_get_status/config" -n -r -d
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/select/${SYSTEM_NAME}_${DEVICE_NAME// /_}/ui_mode/config" -n -r -d
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/button/${SYSTEM_NAME}_${DEVICE_NAME// /_}/scan_games/config" -n -r -d
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/sensor/${SYSTEM_NAME}_${DEVICE_NAME// /_}/total_games/config" -n -r -d
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/sensor/${SYSTEM_NAME}_${DEVICE_NAME// /_}/favorites/config" -n -r -d
-    mosquitto_pub -h "$MQTT_HOST" -p "$MQTT_PORT" -t "homeassistant/sensor/${SYSTEM_NAME}_${DEVICE_NAME// /_}/kid_friendly/config" -n -r -d
-fi
-
-# Test audio for text-to-speech
-echo "Testing text-to-speech functionality..."
-TTS_TEXT="RetroPie Home Assistant integration is now installed."
-pico2wave -w /tmp/tts_test.wav "$TTS_TEXT" && aplay /tmp/tts_test.wav
-rm -f /tmp/tts_test.wav
-
-# Test RetroArch network connection
-if [ "$RETROARCH_ENABLED" = true ]; then
-  echo "Testing RetroArch network connection..."
-  # Create a simple script to test the connection
-  cat > /tmp/retroarch_test.sh << 'EOF'
-#!/bin/bash
-echo -n "VERSION" | nc -u -w1 127.0.0.1 55355
-if [ $? -eq 0 ]; then
-  echo "RetroArch network connection test was successful!"
-else
-  echo "Could not connect to RetroArch. Please make sure RetroArch is running with network commands enabled."
-  echo "If RetroArch is currently closed, this is normal - the connection will be available when you launch RetroArch."
-fi
-EOF
-  chmod +x /tmp/retroarch_test.sh
-  # Run the test script
-  /tmp/retroarch_test.sh
-  rm -f /tmp/retroarch_test.sh
-fi
-
-# Start the service
-sudo systemctl start ${SERVICE_NAME}
-
-# Verify installation
-echo "Verifying installation..."
-sleep 2
-if systemctl is-active --quiet ${SERVICE_NAME}; then
-    echo "Service is running correctly."
-else
-    echo "Service failed to start. Check logs with: sudo journalctl -u ${SERVICE_NAME}"
+    echo "Error: Unknown system type despite earlier detection. This shouldn't happen."
+    exit 1
 fi
 
 echo ""
 echo "Installation completed successfully!"
-echo "The ${SYSTEM_NAME^} Home Assistant Integration is now running."
+echo "Thank you for installing the Home Assistant Integration for your ${SYSTEM_TYPE^} system!"
 echo ""
-echo "To check status: sudo systemctl status ${SERVICE_NAME}"
-echo "To view logs: sudo journalctl -u ${SERVICE_NAME}"
-echo "To view integration logs: cat $CONFIG_DIR/retropie-ha.log"
-echo ""
-echo "Your ${SYSTEM_NAME^} will now report events and status to Home Assistant via MQTT."
+echo "Your $SYSTEM_NAME will now report events and status to Home Assistant via MQTT at: $MQTT_TOPIC_PREFIX"
 echo "Home Assistant should auto-discover the sensors if MQTT integration is configured."
 echo ""
-echo "New features:"
-echo "1. Machine status reporting (idle, playing, shutdown)"
-echo "2. Play duration tracking"
-echo "3. Text-to-speech functionality"
-echo "4. System availability tracking"
-echo "5. RetroArch Network Control Interface integration"
-echo "   - Display messages on RetroArch screen"
-echo "   - Send commands to RetroArch"
-echo "   - Get RetroArch status information"
-echo "6. EmulationStation UI Mode control"
-echo "   - Switch between Full, Kid, and Kiosk modes"
-echo "   - Create automations to switch modes based on conditions"
-echo "7. Game Collection Statistics"
-echo "   - Track total number of games in your collection"
-echo "   - Count favorite games"
-echo "   - Identify kid-friendly games based on ratings"
-echo ""
-echo "You can send text-to-speech commands from Home Assistant by publishing to:"
-echo "  Topic: $MQTT_TOPIC_PREFIX/command/tts"
-echo "  Payload: \"Hello from Home Assistant\""
-echo "  or JSON: {\"text\": \"Hello from Home Assistant\"}"
-echo ""
-echo "RetroArch Network Control Interface commands can be sent via:"
-echo "  Message Display: $MQTT_TOPIC_PREFIX/command/retroarch/message"
-echo "  Status Request: $MQTT_TOPIC_PREFIX/command/retroarch/status"
-echo "  Any Command: $MQTT_TOPIC_PREFIX/command/retroarch"
-echo ""
-echo "EmulationStation UI Mode can be controlled via:"
-echo "  $MQTT_TOPIC_PREFIX/command/ui_mode"
-echo "  Payload: {\"mode\": \"Full\"} or {\"mode\": \"Kid\"} or {\"mode\": \"Kiosk\"}"
-echo ""
-echo "Game collection statistics can be updated via:"
-echo "  $MQTT_TOPIC_PREFIX/command/scan_games"
-echo "  (This happens automatically at startup, but can be triggered manually)"
-echo ""
-# Try to automatically enable RetroArch network commands
-echo "Setting up RetroArch Network Commands..."
-RETROARCH_CFG_PATHS=(
-  "$HOME/.config/retroarch/retroarch.cfg"
-  "/opt/retropie/configs/all/retroarch.cfg"
-  "/etc/retroarch.cfg"
-)
-
-RETROARCH_ENABLED=false
-for CFG_PATH in "${RETROARCH_CFG_PATHS[@]}"; do
-  if [ -f "$CFG_PATH" ]; then
-    echo "Found RetroArch config at: $CFG_PATH"
-    
-    # Check if network_cmd_enable is already set
-    if grep -q "network_cmd_enable" "$CFG_PATH"; then
-      # Update existing setting
-      sed -i 's/network_cmd_enable = "false"/network_cmd_enable = "true"/g' "$CFG_PATH"
-      echo "Updated network_cmd_enable setting to true in $CFG_PATH"
-    else
-      # Add the setting if it doesn't exist
-      echo 'network_cmd_enable = "true"' >> "$CFG_PATH"
-      echo "Added network_cmd_enable = true to $CFG_PATH"
-    fi
-    
-    # Optionally set the network command port if you want to use a specific port
-    if ! grep -q "network_cmd_port" "$CFG_PATH"; then
-      echo 'network_cmd_port = "55355"' >> "$CFG_PATH"
-      echo "Added default network_cmd_port = 55355 to $CFG_PATH"
-    fi
-    
-    RETROARCH_ENABLED=true
-    break
-  fi
-done
-
-if [ "$RETROARCH_ENABLED" = false ]; then
-  echo "WARNING: Could not find RetroArch configuration file."
-  echo "To enable RetroArch Network Commands manually, set:"
-  echo "network_cmd_enable = \"true\" in retroarch.cfg"
-fi
-echo ""
-echo "NOTE: A restart of EmulationStation is recommended:"
-echo "touch /tmp/es-restart && killall emulationstation"
+echo "Note: Remember to always use ./install.sh for future updates or reinstallation."
+echo "      The system-specific scripts ($(basename $SCRIPT_DIR)/retropie_install or"
+echo "      $(basename $SCRIPT_DIR)/batocera_install) cannot be run directly."
