@@ -34,7 +34,7 @@ if os.path.exists("/opt/retropie"):
     SYSTEM_NAME = "retropie"
 elif os.path.exists("/userdata/system"):
     SYSTEM_TYPE = "batocera"
-    CONFIG_DIR = "/userdata/system/retropie-ha"
+    CONFIG_DIR = "/userdata/system/retropie-ha"  # Fixed path to match installation script
     ROMS_DIR = "/userdata/roms"
     SYSTEM_NAME = "batocera"
 else:

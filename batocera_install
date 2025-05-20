@@ -34,7 +34,7 @@ echo "Installing integration..."
 # Check for existing installation and remove it if found
 echo "Checking for existing installation..."
 # Batocera uses batocera-services for service management
-if [ -f /userdata/system/services/batocera_ha.service ]; then
+if [ -f /userdata/system/services/batocera_ha ]; then
     echo "Stopping existing service if running..."
     # Check if the service is managed by batocera-services
     if batocera-services status batocera_ha >/dev/null 2>&1; then
@@ -51,8 +51,14 @@ if [ -f /userdata/system/services/batocera_ha.service ]; then
     fi
     
     echo "Removing existing service file..."
-    rm -f /userdata/system/services/batocera_ha.service
+    rm -f /userdata/system/services/batocera_ha
     echo "Service file removed."
+fi
+
+# Clean up any incorrectly named service file with .service extension
+if [ -f /userdata/system/services/batocera_ha.service ]; then
+    echo "Removing incorrectly named service file with .service extension..."
+    rm -f /userdata/system/services/batocera_ha.service
 fi
 
 # Clean up any existing PID file
@@ -156,19 +162,38 @@ chmod +x "$RC_SCRIPTS_DIR/runcommand-onstart/"* "$RC_SCRIPTS_DIR/runcommand-onen
 echo "Creating Batocera-specific hooks..."
 mkdir -p "$RC_SCRIPTS_DIR/custom.pre.sh.d" "$RC_SCRIPTS_DIR/custom.sh.d"
 
+# Create log file for events
+touch /tmp/ha_events.log
+chmod 666 /tmp/ha_events.log
+
 cat > "$RC_SCRIPTS_DIR/custom.pre.sh.d/01_report_game_start.sh" << 'EOF'
 #!/bin/bash
 # Log the event
-echo "[$(date)] Batocera Game Start: $@" >> /tmp/batocera_events.log
-# Call the report script
+echo "[$(date)] Batocera Game Start: $@" >> /tmp/ha_events.log
+# Call the report script with proper parameters
 ES_SCRIPTS_DIR="/userdata/system/configs/emulationstation/scripts"
-"$ES_SCRIPTS_DIR/game-start/01_report_game_start.sh" "$@"
+
+# In Batocera, the arguments should be:
+# $1 = System name
+# $2 = ROM path (optional)
+# Add more information if available
+if [ -n "$1" ]; then
+  SYSTEM="$1"
+  EMULATOR="batocera"
+  ROM_PATH="${2:-unknown.rom}"
+  
+  "$ES_SCRIPTS_DIR/game-start/01_report_game_start.sh" "$SYSTEM" "$EMULATOR" "$ROM_PATH"
+else
+  # Log warning but still try to call
+  echo "[$(date)] Warning: No system name provided for game start" >> /tmp/ha_events.log
+  "$ES_SCRIPTS_DIR/game-start/01_report_game_start.sh" "unknown" "batocera" "unknown.rom"
+fi
 EOF
 
 cat > "$RC_SCRIPTS_DIR/custom.sh.d/99_report_game_end.sh" << 'EOF'
 #!/bin/bash
 # Log the event
-echo "[$(date)] Batocera Game End: $@" >> /tmp/batocera_events.log
+echo "[$(date)] Batocera Game End: $@" >> /tmp/ha_events.log
 # Call the report script
 ES_SCRIPTS_DIR="/userdata/system/configs/emulationstation/scripts"
 "$ES_SCRIPTS_DIR/game-end/01_report_game_end.sh" "$@"
@@ -179,7 +204,7 @@ chmod +x "$RC_SCRIPTS_DIR/custom.pre.sh.d/01_report_game_start.sh" "$RC_SCRIPTS_
 
 # Create service file - Batocera uses executable service files
 echo "Creating service file..."
-SERVICE_NAME="batocera_ha"
+SERVICE_NAME="batocera_ha"  # No .service extension for Batocera
 SERVICE_DESC="Batocera Home Assistant Integration"
 
 # Create an executable shell script to run as a service
@@ -190,8 +215,12 @@ cat > /tmp/${SERVICE_NAME} << 'EOF'
 # Wait for network to be available
 sleep 10
 
+# First, make sure the log directory exists
+CONFIG_DIR="/userdata/system/retropie-ha"
+mkdir -p "$CONFIG_DIR"
+touch "$CONFIG_DIR/batocera_ha.log"
+
 # Source PYTHONPATH and start the reporter
-CONFIG_DIR="/userdata/system/batocera_ha"
 if [ -f "$CONFIG_DIR/pythonpath.sh" ]; then
     source "$CONFIG_DIR/pythonpath.sh"
     exec python3 "$CONFIG_DIR/status_reporter.py" > /tmp/batocera_ha.log 2>&1 &
@@ -203,18 +232,19 @@ fi
 EOF
 
 # Replace CONFIG_DIR with the actual value in the script
-sed -i "s|/userdata/system/batocera_ha|$CONFIG_DIR|g" /tmp/${SERVICE_NAME}
+sed -i "s|/userdata/system/retropie-ha|$CONFIG_DIR|g" /tmp/${SERVICE_NAME}
 
 # Install service using Batocera's service management approach
 echo "Installing service..."
 mkdir -p /userdata/system/services/
+chmod +x /tmp/${SERVICE_NAME}  # Ensure it's executable
 mv /tmp/${SERVICE_NAME} /userdata/system/services/
 
 # Start the service using Batocera's approach
 echo "Starting service..."
-if batocera-services enable batocera_ha 2>/dev/null; then
+if batocera-services enable $SERVICE_NAME 2>/dev/null; then
     echo "Service enabled via batocera-services"
-    batocera-services start batocera_ha
+    batocera-services start $SERVICE_NAME
 else
     echo "Could not enable service via batocera-services, trying direct start..."
     # Fallback to direct script execution
@@ -230,7 +260,11 @@ else
         cat > "/userdata/system/custom.sh.d/999-start-batocera_ha.sh" << 'EOF'
 #!/bin/bash
 # Auto-start Home Assistant Integration
-CONFIG_DIR="/userdata/system/batocera_ha"
+CONFIG_DIR="/userdata/system/retropie-ha"
+# Create log file if it doesn't exist
+mkdir -p "$CONFIG_DIR"
+touch "$CONFIG_DIR/batocera_ha.log"
+
 if [ -f "$CONFIG_DIR/pythonpath.sh" ]; then
     source "$CONFIG_DIR/pythonpath.sh"
     nohup python3 "$CONFIG_DIR/status_reporter.py" > /tmp/batocera_ha.log 2>&1 &
@@ -245,18 +279,40 @@ fi
 # Verify installation
 echo "Verifying installation..."
 sleep 2
+
+# Make sure HomeAssistant autodiscovery is enabled in the config
+if [ -f "$CONFIG_DIR/config.json" ]; then
+    # Check if autodiscovery is already in the config file
+    if ! grep -q "\"discovery_prefix\"" "$CONFIG_DIR/config.json"; then
+        # Create a temporary file with the updated config
+        echo "Adding HomeAssistant autodiscovery configuration..."
+        CONFIG_TEMP="$(mktemp)"
+        
+        # Use sed to insert discovery_prefix before the closing brace
+        sed 's/}$/,\n  "discovery_prefix": "homeassistant"\n}/' "$CONFIG_DIR/config.json" > "$CONFIG_TEMP"
+        
+        # Replace the original file with the updated config
+        mv "$CONFIG_TEMP" "$CONFIG_DIR/config.json"
+    fi
+fi
+
 if pgrep -f "status_reporter.py" > /dev/null; then
     echo "Service is running correctly."
     echo "You can check logs with: cat /tmp/batocera_ha.log"
+    echo "You can check service logs with: cat $CONFIG_DIR/batocera_ha.log"
     echo "If you encounter any issues, you can restart the service with:"
-    echo "kill \$(cat $CONFIG_DIR/reporter.pid) 2>/dev/null; source $CONFIG_DIR/pythonpath.sh && python3 $CONFIG_DIR/status_reporter.py > /tmp/batocera_ha.log 2>&1 &"
+    echo "batocera-services restart $SERVICE_NAME"
+    echo "Or manually with: kill \$(cat $CONFIG_DIR/reporter.pid) 2>/dev/null; source $CONFIG_DIR/pythonpath.sh && python3 $CONFIG_DIR/status_reporter.py > /tmp/batocera_ha.log 2>&1 &"
 else
     echo "Service failed to start. Check logs with: cat /tmp/batocera_ha.log"
     echo "Attempting to start service directly..."
+    # Make sure CONFIG_DIR exists
+    mkdir -p "$CONFIG_DIR"
     source $CONFIG_DIR/pythonpath.sh
     python3 $CONFIG_DIR/status_reporter.py > /tmp/batocera_ha.log 2>&1 &
     echo $! > "$CONFIG_DIR/reporter.pid"
     echo "Service started directly. Check logs with: cat /tmp/batocera_ha.log"
+    echo "Check service logs with: cat $CONFIG_DIR/batocera_ha.log"
 fi
 
 # Setup RetroArch network commands

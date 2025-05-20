@@ -16,7 +16,7 @@ if os.path.exists("/opt/retropie"):
     SYSTEM_NAME = "retropie"
 elif os.path.exists("/userdata/system"):
     SYSTEM_TYPE = "batocera"
-    CONFIG_DIR = "/userdata/system/batocera_ha"
+    CONFIG_DIR = "/userdata/system/retropie-ha"  # Fixed path to match installation script
     SYSTEM_NAME = "batocera"
 else:
     # Fallback to RetroPie defaults
@@ -24,11 +24,19 @@ else:
     SYSTEM_NAME = "retropie"
 
 # Set up logging
+# Create the log file if it doesn't exist
+if not os.path.exists(CONFIG_DIR):
+    os.makedirs(CONFIG_DIR)
+
+# Use a consistent log file name
+LOG_FILE = os.path.join(CONFIG_DIR, 'batocera_ha.log')
+open(LOG_FILE, 'a').close()  # Touch the file to create it if it doesn't exist
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler(os.path.join(CONFIG_DIR, 'batocera_ha.log'))
+        logging.FileHandler(LOG_FILE)
         # Removed StreamHandler to prevent console output
     ]
 )
