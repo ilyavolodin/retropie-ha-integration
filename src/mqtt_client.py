@@ -334,7 +334,8 @@ def publish_mqtt_message(topic, message, retain=False, max_retries=5, shutdown_m
             return False
       # Use a unique client id to avoid connection conflicts
     client_id = f"{SYSTEM_NAME}-publisher-{int(time.time())}-{os.getpid()}"
-    client = mqtt.Client(client_id=client_id)
+    # Use the newer API version to avoid deprecation warnings
+    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1, client_id=client_id)
     
     # Set up a connection callback to track successful connections
     connection_successful = False
@@ -1968,7 +1969,8 @@ def start_mqtt_listener(max_retries=10):
         logger.error("MQTT host not configured, cannot start listener")
         return False
       # Create a more robust client with auto-reconnect
-    client = mqtt.Client(client_id=f"{SYSTEM_NAME}-ha-{int(time.time())}", clean_session=True)
+    # Use the newer API version to avoid deprecation warnings
+    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1, client_id=f"{SYSTEM_NAME}-ha-{int(time.time())}", clean_session=True)
     client.on_connect = on_connect
     client.on_message = on_message
     
@@ -2263,7 +2265,8 @@ def register_with_ha():
     }
     
     # Create an active client to ensure connection before publishing
-    client = mqtt.Client()
+    # Use the newer API version to avoid deprecation warnings
+    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1)
     client.on_connect = on_connect
     
     if config.get('mqtt_username') and config.get('mqtt_password'):

@@ -102,19 +102,32 @@ def main():
     # Try to start and register repeatedly until successful
     while current_retry < max_retries:
         try:
-            # Send system start event
+            # Send system start event with timeout
             logger.info("Service starting, sending system-start event")
-            subprocess.run(['python3', MQTT_CLIENT, '--event', 'system-start'], check=True)
+            subprocess.run(['python3', MQTT_CLIENT, '--event', 'system-start'], 
+                          check=True, timeout=30)
             
-            # Register with Home Assistant
+            # Register with Home Assistant with timeout
             logger.info("Registering with Home Assistant")
-            subprocess.run(['python3', MQTT_CLIENT, '--register'], check=True)
+            subprocess.run(['python3', MQTT_CLIENT, '--register'], 
+                          check=True, timeout=30)
             
-            # Start the MQTT listener in a separate process
+            # Start the MQTT listener in a separate process with proper error handling
             logger.info("Starting MQTT listener")
-            listener_process = subprocess.Popen(['python3', MQTT_CLIENT, '--listen'], 
-                                              stdout=subprocess.PIPE, 
-                                              stderr=subprocess.PIPE)
+            try:
+                listener_process = subprocess.Popen(['python3', MQTT_CLIENT, '--listen'], 
+                                                  stdout=subprocess.PIPE, 
+                                                  stderr=subprocess.PIPE)
+                # Give it a moment to start and check if it immediately fails
+                time.sleep(2)
+                if listener_process.poll() is not None:
+                    # Process exited immediately
+                    stdout, stderr = listener_process.communicate()
+                    logger.error(f"MQTT listener failed to start: {stderr.decode()}")
+                    raise Exception("MQTT listener failed to start")
+            except Exception as e:
+                logger.error(f"Failed to start MQTT listener: {e}")
+                raise
             
             logger.info(f"Status reporter started with PID {os.getpid()}")
             
@@ -150,9 +163,22 @@ def main():
                 logger.info(f"Restarting MQTT listener in {restart_delay} seconds...")
                 time.sleep(restart_delay)
                 logger.info("Restarting MQTT listener")
-                listener_process = subprocess.Popen(['python3', MQTT_CLIENT, '--listen'], 
-                                                  stdout=subprocess.PIPE, 
-                                                  stderr=subprocess.PIPE)
+                try:
+                    listener_process = subprocess.Popen(['python3', MQTT_CLIENT, '--listen'], 
+                                                      stdout=subprocess.PIPE, 
+                                                      stderr=subprocess.PIPE)
+                    # Give it a moment to start and check if it immediately fails
+                    time.sleep(2)
+                    if listener_process.poll() is not None:
+                        # Process exited immediately
+                        stdout, stderr = listener_process.communicate()
+                        logger.error(f"MQTT listener failed to restart: {stderr.decode()}")
+                        # We'll try again in the next loop iteration
+                    else:
+                        logger.info("MQTT listener restarted successfully")
+                except Exception as e:
+                    logger.error(f"Failed to restart MQTT listener: {e}")
+                    # We'll try again in the next loop iteration
             
             # Sleep before checking again
             time.sleep(5)
