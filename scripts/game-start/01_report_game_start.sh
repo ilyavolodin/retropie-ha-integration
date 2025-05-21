@@ -42,7 +42,13 @@ if [ -f "$PYTHON_SCRIPT" ]; then
     python3 "$PYTHON_SCRIPT" --event game-start "$SYSTEM" "$EMULATOR" "$ROM_PATH" >/dev/null 2>&1
   else
     # Normal operation with all required args
-    python3 "$PYTHON_SCRIPT" --event game-start "$@" >/dev/null 2>&1
+    # For Batocera, make sure we properly escape any special characters in the ROM path
+    ROM_PATH="${@: -1}"  # Get the last argument (ROM path)
+    SYSTEM="${1}"        # First argument is system name
+    EMULATOR="${2}"      # Second argument is emulator name
+    
+    echo "[$(date)] Parsed arguments: SYSTEM=$SYSTEM EMULATOR=$EMULATOR ROM_PATH=$ROM_PATH" >> /tmp/ha_events.log
+    python3 "$PYTHON_SCRIPT" --event game-start "$SYSTEM" "$EMULATOR" "$ROM_PATH" >/dev/null 2>&1
   fi
 else
   echo "[$(date)] Error: Python script not found at $PYTHON_SCRIPT" >> /tmp/ha_events.log

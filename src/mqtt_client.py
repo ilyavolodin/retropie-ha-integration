@@ -218,6 +218,9 @@ def get_system_info():
 def get_game_metadata(system, rom_path):
     """Get game metadata from EmulationStation gamelist.xml"""
     try:
+        # Log the input parameters
+        logger.info(f"Getting metadata for system={system}, rom_path={rom_path}")
+        
         # Clean up input paths
         if rom_path.startswith('./'):
             rom_path = rom_path[2:]  # Remove ./ prefix
@@ -242,6 +245,7 @@ def get_game_metadata(system, rom_path):
         for path in gamelist_paths:
             if os.path.exists(path):
                 gamelist_path = path
+                logger.info(f"Found gamelist.xml at: {path}")
                 break
         
         if not gamelist_path:
@@ -252,6 +256,16 @@ def get_game_metadata(system, rom_path):
         tree = ET.parse(gamelist_path)
         root = tree.getroot()
         
+        # Get the base name for matching
+        rom_basename = os.path.basename(rom_path)
+        rom_name_no_ext = os.path.splitext(rom_basename)[0]
+        
+        # Clean the name for matching
+        cleaned_rom_name = rom_basename.replace('-', ' ').replace('[!]', '').strip()
+        cleaned_rom_name_no_ext = rom_name_no_ext.replace('-', ' ').replace('[!]', '').strip()
+        
+        logger.info(f"Looking for matches with: basename={rom_basename}, name_no_ext={rom_name_no_ext}, cleaned={cleaned_rom_name}")
+        
         # Find the game entry
         for game in root.findall('game'):
             path_elem = game.find('path')
@@ -261,8 +275,24 @@ def get_game_metadata(system, rom_path):
                 if game_path.startswith('./'):
                     game_path = game_path[2:]
                 
-                # Check if paths match
-                if os.path.basename(game_path) == os.path.basename(rom_path):
+                # Get game basename for matching
+                game_basename = os.path.basename(game_path)
+                game_name_no_ext = os.path.splitext(game_basename)[0]
+                cleaned_game_name = game_basename.replace('-', ' ').replace('[!]', '').strip()
+                cleaned_game_name_no_ext = game_name_no_ext.replace('-', ' ').replace('[!]', '').strip()
+                
+                logger.debug(f"Comparing with game: {game_basename}, no_ext={game_name_no_ext}, cleaned={cleaned_game_name}")
+                
+                # Check if paths match - with all possible combinations
+                if (game_basename == rom_basename or 
+                    game_name_no_ext == rom_name_no_ext or
+                    cleaned_game_name == cleaned_rom_name or
+                    cleaned_game_name_no_ext == cleaned_rom_name_no_ext or
+                    # Even looser matching - is the rom name contained in the game name or vice versa
+                    cleaned_rom_name_no_ext in cleaned_game_name_no_ext or
+                    cleaned_game_name_no_ext in cleaned_rom_name_no_ext):
+                    
+                    logger.info(f"Found matching game in gamelist.xml: {game_basename}")
                     metadata = {}
                     
                     # Get basic metadata
@@ -276,6 +306,8 @@ def get_game_metadata(system, rom_path):
                     elif game.find('n') is not None:
                         metadata['name'] = game.find('n').text
                     
+                    logger.info(f"Game name from metadata: {metadata.get('name', 'Not found')}")
+                    
                     # Get image paths and convert to base64 if they exist
                     for img_type in ['image', 'thumbnail', 'marquee']:
                         img_elem = game.find(img_type)
@@ -284,17 +316,52 @@ def get_game_metadata(system, rom_path):
                             if img_path.startswith('./'):
                                 img_path = img_path[2:]
                             
+                            logger.info(f"Found {img_type} path in metadata: {img_path}")
+                            
+                            # Check if the image exists - carefully handle paths
                             full_img_path = os.path.join(ROMS_DIR, system, img_path)
+                            logger.info(f"Full image path: {full_img_path}")
+                            
+                            # Try a few variations if the direct path doesn't exist
+                            if not os.path.exists(full_img_path):
+                                logger.info(f"Image not found at {full_img_path}, trying alternatives")
+                                
+                                # Check if there's a .jpg instead of .png or vice versa
+                                alt_paths = []
+                                if full_img_path.endswith('.png'):
+                                    alt_paths.append(full_img_path.replace('.png', '.jpg'))
+                                elif full_img_path.endswith('.jpg'):
+                                    alt_paths.append(full_img_path.replace('.jpg', '.png'))
+                                
+                                # Try each alternative
+                                for alt_path in alt_paths:
+                                    if os.path.exists(alt_path):
+                                        logger.info(f"Found alternative image at {alt_path}")
+                                        full_img_path = alt_path
+                                        img_path = os.path.relpath(alt_path, os.path.join(ROMS_DIR, system))
+                                        break
+                            
                             if os.path.exists(full_img_path):
                                 try:
+                                    # Store the image path relative to ROMS_DIR 
+                                    rel_img_path = os.path.join(system, img_path)
+                                    metadata['image_path'] = rel_img_path
+                                    logger.info(f"Successfully found image: {rel_img_path}")
+                                    
                                     # Only include the thumbnail to keep the size reasonable
                                     if img_type == 'thumbnail':
                                         with open(full_img_path, 'rb') as img_file:
                                             img_data = img_file.read()
                                             metadata['image_data'] = base64.b64encode(img_data).decode('utf-8')
-                                            metadata['image_path'] = full_img_path
+                                            metadata['full_image_path'] = full_img_path
                                 except Exception as e:
                                     logger.error(f"Failed to read image file {full_img_path}: {e}")
+                            else:
+                                logger.warning(f"Image file not found: {full_img_path}")
+                    
+                    # Check if we found an image path
+                    if 'image_path' not in metadata:
+                        logger.warning(f"No image path found for game {metadata.get('name', rom_basename)}")
                     
                     return metadata
         
@@ -302,6 +369,8 @@ def get_game_metadata(system, rom_path):
         return {}
     except Exception as e:
         logger.error(f"Error getting game metadata: {e}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
         return {}
 
 def publish_mqtt_message(topic, message, retain=False, max_retries=5, shutdown_mode=False):
@@ -481,15 +550,35 @@ def publish_game_event(event_type, event_args=None):
         if 'retroarch' in emulator.lower():
             threading.Thread(target=verify_retroarch_network_commands, daemon=True).start()
         
+        # Log received arguments for debugging
+        logger.info(f"Game-start event received with system={system}, emulator={emulator}, rom_path={rom_path}")
+        
         # Get additional game metadata
         metadata = get_game_metadata(system, rom_path)
         display_name = metadata.get('name', game_name)
+        
+        # Log found metadata for debugging
+        logger.info(f"Game metadata found: display_name={display_name}, metadata keys: {list(metadata.keys())}")
+        if 'image_path' in metadata:
+            logger.info(f"Image path found in metadata: {metadata['image_path']}")
         
         # Update state
         current_state['machine_status'] = 'playing'
         current_state['current_game'] = display_name
         current_state['game_start_time'] = int(time.time())
         current_state['last_update'] = int(time.time())
+        
+        # Save image path in state if available
+        if 'image_path' in metadata:
+            current_state['image_path'] = metadata['image_path']
+            logger.info(f"Saved image_path to current_state: {metadata['image_path']}")
+        else:
+            logger.warning(f"No image_path found in metadata for game: {display_name}")
+            # Remove image_path from state if it exists
+            if 'image_path' in current_state:
+                current_state.pop('image_path')
+                logger.info("Removed existing image_path from current_state")
+            
         save_state()
         
         # Build payload with metadata
@@ -501,6 +590,13 @@ def publish_game_event(event_type, event_args=None):
             'game_name': display_name,
             'start_time': current_state['game_start_time']
         }
+        
+        # Also add image_path to the event payload directly
+        if 'image_path' in metadata:
+            game_data['image_path'] = metadata['image_path']
+            logger.info(f"Added image_path to game_data payload: {metadata['image_path']}")
+        else:
+            logger.warning(f"No image_path to add to game_data payload for game: {display_name}")
         
         # Add additional metadata if available
         if 'desc' in metadata:
@@ -540,6 +636,11 @@ def publish_game_event(event_type, event_args=None):
         current_state['current_game'] = None
         current_state['game_start_time'] = None
         current_state['last_update'] = int(time.time())
+        
+        # Clear image path if it was set
+        if 'image_path' in current_state:
+            current_state.pop('image_path')
+            
         save_state()
         
         # Also update machine status
@@ -634,6 +735,13 @@ def publish_machine_status():
     # Add play duration if a game is running
     if current_state['machine_status'] == 'playing' and current_state['game_start_time']:
         payload['play_duration_seconds'] = int(time.time()) - current_state['game_start_time']
+        
+        # Add image path if available in state
+        if 'image_path' in current_state:
+            payload['image_path'] = current_state['image_path']
+            logger.info(f"Adding image_path to machine_status payload: {current_state['image_path']}")
+        else:
+            logger.warning("No image_path available in current_state for machine_status payload")
     
     # Publish to the machine_status topic
     topic = f"{topic_prefix}/machine_status"
@@ -2143,8 +2251,23 @@ def register_with_ha():
         "state_topic": f"{topic_prefix}/machine_status",
         "value_template": "{{ value_json.current_game if value_json.current_game else 'None' }}",
         "json_attributes_topic": f"{topic_prefix}/event/game-start",
-        "json_attributes_template": "{{ {'description': value_json.description if 'description' in value_json else '', 'system': value_json.system if 'system' in value_json else '', 'emulator': value_json.emulator if 'emulator' in value_json else '', 'genre': value_json.genre if 'genre' in value_json else '', 'developer': value_json.developer if 'developer' in value_json else '', 'publisher': value_json.publisher if 'publisher' in value_json else '', 'rating': value_json.rating if 'rating' in value_json else '', 'releasedate': value_json.releasedate if 'releasedate' in value_json else '', 'start_time': value_json.start_time if 'start_time' in value_json else '' } | tojson }}",
+        "json_attributes_template": "{{ {'description': value_json.description if 'description' in value_json else '', 'system': value_json.system if 'system' in value_json else '', 'emulator': value_json.emulator if 'emulator' in value_json else '', 'genre': value_json.genre if 'genre' in value_json else '', 'developer': value_json.developer if 'developer' in value_json else '', 'publisher': value_json.publisher if 'publisher' in value_json else '', 'rating': value_json.rating if 'rating' in value_json else '', 'releasedate': value_json.releasedate if 'releasedate' in value_json else '', 'start_time': value_json.start_time if 'start_time' in value_json else '', 'image_path': value_json.image_path if 'image_path' in value_json else '' } | tojson }}",
         "icon": "mdi:gamepad-variant",
+        "availability": availability,
+        "availability_mode": "all",
+        "enabled_by_default": True,
+        "origin": origin_info
+    }
+    
+    # Register dedicated game image path sensor
+    game_image_path_config = {
+        "device": device_info,
+        "name": f"RetroPie {device_name} Game Image Path",
+        "unique_id": f"retropie_{safe_device_name}_game_image_path",
+        "object_id": f"retropie_{safe_device_name}_game_image_path",
+        "state_topic": f"{topic_prefix}/machine_status",
+        "value_template": "{{ value_json.image_path if 'image_path' in value_json else '' }}",
+        "icon": "mdi:image",
         "availability": availability,
         "availability_mode": "all",
         "enabled_by_default": True,
@@ -2324,6 +2447,15 @@ def register_with_ha():
             retain=True
         )
         logger.info(f"Published game status sensor config")
+        
+        # Publish game image path sensor config
+        client.publish(
+            f"homeassistant/sensor/retropie_{safe_device_name}/game_image_path/config",
+            json.dumps(game_image_path_config),
+            qos=1,
+            retain=True
+        )
+        logger.info(f"Published game image path sensor config")
         
         client.publish(
             f"homeassistant/sensor/retropie_{safe_device_name}/play_duration/config",
